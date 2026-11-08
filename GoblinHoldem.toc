@@ -1,0 +1,24 @@
+## Interface: 16001
+## Title: |cffffd100Goblin Hold'em|r
+## Notes: No-limit Texas Hold'em with your party or raid. Sealed, server-rolled shuffle that every player's add-on audits.
+## Author: FelixAllistar
+## Version: 0.1.0
+## IconTexture: Interface\Icons\INV_Misc_Coin_04
+## SavedVariables: GoblinHoldemDB
+
+Core\Util.lua
+Core\SHA256.lua
+Core\Cards.lua
+Core\Eval.lua
+Core\Engine.lua
+Core\Fair.lua
+Core\Comm.lua
+Core\Ledger.lua
+Core\Table.lua
+Core\Lobby.lua
+Core\Init.lua
+
+UI\Widgets.lua
+UI\TableFrame.lua
+UI\LobbyFrame.lua
+UI\LedgerFrame.lua
