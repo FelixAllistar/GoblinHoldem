@@ -60,12 +60,17 @@ local function pump()
 	lastRefill = now
 	while #queue > 0 and tokens >= 1 do
 		local m = queue[1]
-		if rawSend(m.text, m.dist, m.target) then
+		local target = m.target
+		if m.chan then -- channel numbers are per-character; resolve at send time (join may be pending)
+			target = GetChannelName and GetChannelName(m.chan) or 0
+			if type(target) ~= "number" then target = tonumber(target) or 0 end
+		end
+		if target ~= 0 and rawSend(m.text, m.dist, target) then
 			table.remove(queue, 1)
 			tokens = tokens - 1
 		else
 			m.tries = (m.tries or 0) + 1
-			if m.tries > 8 then table.remove(queue, 1) ns.Debug("dropped message after retries") end
+			if m.tries > (m.chan and 60 or 8) then table.remove(queue, 1) ns.Debug("dropped message after retries") end
 			tokens = 0
 			break
 		end
@@ -79,9 +84,9 @@ local function pump()
 end
 
 local msgId = 0
-local function enqueue(payload, dist, target)
+local function enqueue(payload, dist, target, chan)
 	if #payload + 1 <= MAX then
-		queue[#queue + 1] = { text = "1" .. payload, dist = dist, target = target }
+		queue[#queue + 1] = { text = "1" .. payload, dist = dist, target = target, chan = chan }
 	else
 		msgId = (msgId + 1) % 1296
 		local id = b36(math.floor(msgId / 36)) .. b36(msgId % 36)
@@ -90,7 +95,7 @@ local function enqueue(payload, dist, target)
 		assert(total <= 35, "message too large")
 		for i = 1, total do
 			local part = payload:sub((i - 1) * size + 1, i * size)
-			queue[#queue + 1] = { text = "M" .. id .. b36(i) .. b36(total) .. part, dist = dist, target = target }
+			queue[#queue + 1] = { text = "M" .. id .. b36(i) .. b36(total) .. part, dist = dist, target = target, chan = chan }
 		end
 	end
 	if not pumping then pump() end
@@ -116,12 +121,48 @@ function Comm.GroupDist()
 	return nil
 end
 
---- Send to the whole table (the group). Processed locally right away, in order.
+--- Where table messages go. Set by the table you're at:
+---   group    -> PARTY/RAID
+---   channel  -> a private, password-protected chat channel (players can be anywhere)
+---   practice -> nowhere; solo table against bots on this client
+Comm.route = nil
+function Comm.SetRoute(cfg)
+	Comm.route = cfg and { kind = cfg.transport or "group", channel = cfg.channel } or nil
+end
+
+--- Send to the whole table. Processed locally right away, in order.
 function Comm.Group(...)
 	local payload = Comm.Join(...)
-	local dist = Comm.GroupDist()
-	if dist then enqueue(payload, dist) end
+	local r = Comm.route
+	if r and r.kind == "channel" and r.channel then
+		enqueue(payload, "CHANNEL", nil, r.channel)
+	elseif r and r.kind == "practice" then
+		-- local only
+	else
+		local dist = Comm.GroupDist()
+		if dist then enqueue(payload, dist) end
+	end
 	Comm.Deliver(Comm.Me(), "LOCAL", payload)
+end
+
+--- Join a (hidden) custom chat channel and keep it out of the chat windows.
+function Comm.JoinChannel(name, password)
+	if GetChannelName and (GetChannelName(name) or 0) ~= 0 then return end
+	local join = JoinTemporaryChannel or JoinChannelByName
+	if join then pcall(join, name, password) end
+	C_Timer.After(1.5, function() Comm.HideChannel(name) end)
+end
+
+function Comm.LeaveChannel(name)
+	if name and LeaveChannelByName then pcall(LeaveChannelByName, name) end
+end
+
+function Comm.HideChannel(name)
+	if not ChatFrame_RemoveChannel then return end
+	for i = 1, (NUM_CHAT_WINDOWS or 10) do
+		local cf = _G["ChatFrame" .. i]
+		if cf then pcall(ChatFrame_RemoveChannel, cf, name) end
+	end
 end
 
 function Comm.Whisper(target, ...)

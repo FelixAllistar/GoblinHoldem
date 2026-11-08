@@ -17,7 +17,7 @@ function UI:Create()
 	if self.frame then return self.frame end
 	local f = CreateFrame("Frame", "GoblinHoldemLobby", UIParent, W.BACKDROP_TEMPLATE)
 	self.frame = f
-	f:SetSize(560, 520)
+	f:SetSize(560, 610)
 	f:SetPoint("CENTER", 0, 40)
 	f:SetFrameStrata("HIGH")
 	f:SetToplevel(true)
@@ -62,9 +62,20 @@ function UI:Create()
 	self.empty:SetTextColor(0.7, 0.7, 0.7)
 	self.empty:SetText("No public tables heard yet. Dealers advertise every minute or so.")
 
+	-- join a friend directly
+	local jl = W.Text(f, 12)
+	jl:SetPoint("TOPLEFT", list, "BOTTOMLEFT", 4, -12)
+	jl:SetText("Join a friend's table by name:")
+	jl:SetTextColor(1, 0.9, 0.7)
+	self.joinName = W.Edit(f, 130)
+	self.joinName:SetPoint("LEFT", jl, "RIGHT", 12, 0)
+	self.joinName:SetScript("OnEnterPressed", function(e) ns.Table.RequestJoin(e:GetText()) e:ClearFocus() end)
+	local jb = W.Button(f, "Join", 60, 20, function() ns.Table.RequestJoin(UI.joinName:GetText()) end)
+	jb:SetPoint("LEFT", self.joinName, "RIGHT", 6, 0)
+
 	-- host form
 	local host = W.Text(f, 14, W.FONT_TITLE)
-	host:SetPoint("TOPLEFT", list, "BOTTOMLEFT", 4, -14)
+	host:SetPoint("TOPLEFT", jl, "BOTTOMLEFT", 0, -18)
 	host:SetText("Host a table")
 	host:SetTextColor(1, 0.82, 0)
 
@@ -96,7 +107,22 @@ function UI:Create()
 	self.modeHelp:SetJustifyH("LEFT")
 	self.modeHelp:SetTextColor(0.75, 0.75, 0.75)
 
-	local lBlinds = label("Blinds", lMode, 0, -46)
+	local lWhere = label("Players", lMode, 0, -46)
+	self.whereButtons = {}
+	local prevW
+	for _, tr in ipairs({ { "channel", "Anywhere" }, { "group", "In my party/raid" } }) do
+		local b = W.Button(f, tr[2], 140, 22, function() UI:SetWhere(tr[1]) end)
+		if prevW then b:SetPoint("LEFT", prevW, "RIGHT", 4, 0) else b:SetPoint("LEFT", lWhere, "LEFT", 104, 0) end
+		prevW = b
+		self.whereButtons[tr[1]] = b
+	end
+	self.whereHelp = W.Text(f, 11)
+	self.whereHelp:SetPoint("TOPLEFT", lWhere, "BOTTOMLEFT", 0, -10)
+	self.whereHelp:SetWidth(510)
+	self.whereHelp:SetJustifyH("LEFT")
+	self.whereHelp:SetTextColor(0.75, 0.75, 0.75)
+
+	local lBlinds = label("Blinds", lWhere, 0, -32)
 	self.sb = W.Edit(f, 70)
 	self.sb:SetPoint("LEFT", lBlinds, "LEFT", 110, 0)
 	local slash = W.Text(f, 12) slash:SetPoint("LEFT", self.sb, "RIGHT", 4, 0) slash:SetText("/")
@@ -128,19 +154,25 @@ function UI:Create()
 	self.myBuy:SetPoint("LEFT", self.play.label, "RIGHT", 10, 0)
 	self.public = W.Check(f, "Advertise in the lobby (realm channel + guild)")
 	self.public:SetPoint("TOPLEFT", self.play, "BOTTOMLEFT", 0, -4)
+	self.approve = W.Check(f, "Approve each player who asks to join")
+	self.approve:SetPoint("TOPLEFT", self.public, "BOTTOMLEFT", 0, -4)
 
 	self.unitsHint = W.Text(f, 11)
-	self.unitsHint:SetPoint("TOPLEFT", self.public, "BOTTOMLEFT", 4, -6)
+	self.unitsHint:SetPoint("TOPLEFT", self.approve, "BOTTOMLEFT", 4, -6)
 	self.unitsHint:SetTextColor(0.6, 0.6, 0.6)
 
 	self.open = W.Button(f, "Open Table", 140, 26, function() UI:Host() end)
 	self.open:SetPoint("BOTTOMRIGHT", -22, 20)
-	self.note = W.Text(f, 11)
-	self.note:SetPoint("BOTTOMLEFT", 22, 26)
-	self.note:SetWidth(360)
-	self.note:SetJustifyH("LEFT")
-	self.note:SetTextColor(0.8, 0.7, 0.5)
-	self.note:SetText("Tables run inside your party or raid so everyone sees every /roll.")
+	self.practice = W.Button(f, "Practice vs bots", 140, 26, function()
+		local t, err = ns.Table.HostPractice(4)
+		if not t then return ns.Print(err) end
+		UI.frame:Hide()
+	end)
+	self.practice:SetPoint("BOTTOMLEFT", 22, 20)
+	W.Tooltip(self.practice, function(tt)
+		tt:AddLine("Practice table", 1, 0.82, 0)
+		tt:AddLine("Play solo against four goblin bots with play chips. Nothing is sent to anyone.", 1, 1, 1, true)
+	end)
 
 	-- defaults
 	local d = ns.db and ns.db.hostDefaults or {}
@@ -155,7 +187,10 @@ function UI:Create()
 	self.myBuy:SetText(d.myBuy or "100")
 	self.play:SetChecked(d.play ~= false)
 	self.public:SetChecked(d.public and true or false)
+	self.approve:SetChecked(d.approve and true or false)
+	self.where = d.where or "channel"
 	self:SetMode(self.mode)
+	self:SetWhere(self.where)
 
 	f:Hide()
 	return f
@@ -168,6 +203,19 @@ function UI:SetMode(m)
 	end
 	self.modeHelp:SetText(MODE_HELP[m])
 	self:UpdateForm()
+end
+
+local WHERE_HELP = {
+	channel = "Friends can be anywhere on the realm - no party needed. The table runs on a private chat channel; invite people with the Invite button or they type /holdem join <your name>.",
+	group = "Everyone at the table is in your party/raid, and the shuffle uses real server /rolls everyone sees. Best for in-person tables.",
+}
+
+function UI:SetWhere(w)
+	self.where = w
+	for k, b in pairs(self.whereButtons) do
+		if k == w then b:LockHighlight() else b:UnlockHighlight() end
+	end
+	self.whereHelp:SetText(WHERE_HELP[w])
 end
 
 function UI:UpdateForm()
@@ -192,6 +240,8 @@ function UI:Host()
 		actTimeout = math.max(10, math.min(120, tonumber(self.timer:GetText()) or 30)),
 		dealerSeated = self.play:GetChecked() and m ~= "bank",
 		public = self.public:GetChecked() and true or false,
+		approveJoins = self.approve:GetChecked() and true or false,
+		transport = self.where or "channel",
 	}
 	if cfg.name == "" then cfg.name = "Goblin Hold'em" end
 	if not (cfg.sb and cfg.bb and cfg.sb > 0 and cfg.bb >= cfg.sb) then return ns.Print("Blinds look wrong: small blind must be > 0 and big blind at least the small blind.") end
@@ -207,6 +257,7 @@ function UI:Host()
 			name = cfg.name, mode = m, sb = self.sb:GetText(), bb = self.bb:GetText(), minBuy = self.minBuy:GetText(),
 			maxBuy = self.maxBuy:GetText(), seats = self.seats:GetText(), timer = self.timer:GetText(),
 			myBuy = self.myBuy:GetText(), play = self.play:GetChecked() and true or false, public = cfg.public,
+			approve = cfg.approveJoins, where = cfg.transport,
 		}
 	end
 	local t, err = ns.Table.Host(cfg)
@@ -229,7 +280,8 @@ function UI:Refresh()
 			local mode = ns.Table.MODES[e.mode] or e.mode
 			r.text:SetText(("|cffffd100%s|r  %s/%s  %d/%d  |cffaaaaaa%s - %s|r%s"):format(
 				e.name, ns.Money(e.sb, e.mode, true), ns.Money(e.bb, e.mode, true), e.seated, e.maxSeats,
-				e.dealer, e.where ~= "" and e.where or mode, e.dealerSeated and " |cffffa040(dealer plays)|r" or ""))
+				e.dealer, e.transport == "group" and ("in person: " .. (e.where ~= "" and e.where or "party")) or "anywhere",
+				e.dealerSeated and " |cffffa040(dealer plays)|r" or ""))
 			r.join:SetScript("OnClick", function() ns.Lobby.RequestJoin(e) end)
 			W.Tooltip(r, function(tt)
 				tt:AddLine(e.name, 1, 0.82, 0)

@@ -1,5 +1,10 @@
--- Table protocol: one dealer (the host) and any number of seated players / spectators in the
--- same party or raid. Every client runs the same Engine and applies the same messages.
+-- Table protocol: one dealer (the host) and any number of seated players / spectators. Every
+-- client runs the same Engine and applies the same messages. Messages travel over the party/raid,
+-- over a private password-protected chat channel (players anywhere on the realm), or nowhere at
+-- all for a solo practice table against bots.
+--
+-- Shuffle entropy: in a party the Blizzard server's /rolls (everyone in the group sees them);
+-- elsewhere each player's add-on sends a random seed after the deck is sealed.
 --
 -- Trust model, in one paragraph:
 --   * Actions are sent by the player who takes them (the server stamps the sender; it can't be faked)
@@ -22,6 +27,12 @@ Table.MODES = {
 	bank = "House bank",
 	fun = "Play chips",
 }
+Table.TRANSPORTS = {
+	channel = "Anywhere",
+	group = "Party/raid",
+	practice = "Practice",
+}
+Table.BOT_NAMES = { "Gazlowe", "Nixxie", "Sprocket", "Fizzwick", "Grimble", "Ruxle", "Zapnozzle", "Krinkle" }
 
 local function after(delay, fn) C_Timer.After(delay, fn) end
 local function me() return Comm.Me() end
@@ -159,12 +170,35 @@ end
 ---------------------------------------------------------------------------------------------
 -- Hosting
 ---------------------------------------------------------------------------------------------
+local function prepareCfg(cfg)
+	cfg.transport = Table.TRANSPORTS[cfg.transport or ""] and cfg.transport or "group"
+	cfg.entropy = cfg.transport == "group" and "roll" or "seed"
+end
+
+local function enterTable(t)
+	local old = ns.current
+	if old and old ~= t and old.cfg.channel and old.cfg.channel ~= t.cfg.channel then
+		Comm.LeaveChannel(old.cfg.channel)
+	end
+	ns.current = t
+	Comm.SetRoute(t.cfg)
+	if t.cfg.transport == "channel" and t.cfg.channel then Comm.JoinChannel(t.cfg.channel, t.cfg.password) end
+end
+
 function Table.Host(cfg)
 	if ns.current and ns.current.phase ~= "closed" then return nil, "you are already at a table" end
-	if not Comm.GroupDist() and not cfg.allowSolo then return nil, "form a party or raid first - the table runs on your group" end
+	prepareCfg(cfg)
+	if cfg.transport == "group" and not Comm.GroupDist() then
+		return nil, "a party/raid table needs a group - host it as Anywhere instead"
+	end
 	local id = Fair.NewSecret():sub(1, 6)
+	if cfg.transport == "channel" then
+		cfg.channel = "GHold" .. id
+		cfg.password = Fair.NewSecret():sub(1, 10)
+	end
 	local t = newTable(id, me(), cfg)
-	ns.current = t
+	if cfg.transport == "practice" then t.bots = {} end
+	enterTable(t)
 	t:Log(("You opened %s: %s/%s no-limit, %s."):format(cfg.name, t:Fmt(cfg.sb), t:Fmt(cfg.bb), Table.MODES[cfg.mode]))
 	t:Announce()
 	if cfg.dealerSeated and cfg.dealerBuyIn then
@@ -186,18 +220,48 @@ function Table.Restore(s)
 	t.stats = s.stats or t.stats
 	t.autoDeal = s.autoDeal ~= false
 	t.engine.button = s.button or 0
+	t.bots = s.bots
 	for _, e in ipairs(s.entries or {}) do
 		t.engine.seats[e.seat] = { name = e.name, stack = e.stack, sittingOut = e.out }
 	end
 	t.synced = true
+	prepareCfg(t.cfg)
+	enterTable(t)
 	return t
 end
 
 function Table:Announce(target)
 	local c = self.cfg
 	local fields = { "TBL", self.id, c.name, c.sb, c.bb, c.minBuy, c.maxBuy, c.maxSeats, c.mode,
-		c.dealerSeated and 1 or 0, c.actTimeout, self.handNo, ns.version or "dev" }
+		c.dealerSeated and 1 or 0, c.actTimeout, self.handNo, ns.version or "dev",
+		c.transport, c.channel or "", c.password or "" }
 	if target then Comm.Whisper(target, unpack(fields)) else Comm.Group(unpack(fields)) end
+end
+
+--- Dealer: bring someone to the table. Party tables invite them to the group; anywhere tables
+--- whisper them the table (their add-on asks before joining).
+function Table:Invite(name)
+	name = ns.NormName((name or ""):gsub("%s", ""))
+	if not name or name == "" or name == me() then return end
+	if self.cfg.transport == "practice" then return end
+	if self.cfg.transport == "group" then
+		if C_PartyInfo and C_PartyInfo.InviteUnit then C_PartyInfo.InviteUnit(name) elseif InviteUnit then InviteUnit(name) end
+	else
+		self.invited = self.invited or {}
+		self.invited[name] = true
+		self:Announce(name)
+	end
+	self:Log("Invited " .. name .. ".")
+end
+
+--- Someone asked to join (lobby button or /holdem join <dealer>).
+function Table:HandleJoin(name)
+	if self.phase == "closed" or self.cfg.transport == "practice" then return end
+	if self.cfg.approveJoins then
+		self:AddRequest({ kind = "join", name = name, amount = 0 })
+	else
+		self:Invite(name)
+	end
 end
 
 --- Approved seat changes are applied between hands only.
@@ -278,8 +342,12 @@ function Table:AddRequest(req)
 		if r.name == req.name and r.kind == req.kind then table.remove(self.requests, i) break end
 	end
 	self.requests[#self.requests + 1] = req
-	self:Log(("%s asks to %s for %s - approve it once you have the gold."):format(req.name,
-		req.kind == "sit" and "sit down" or "add chips", self:Fmt(req.amount or 0)))
+	if req.kind == "join" then
+		self:Log(req.name .. " asks to join the table.")
+	else
+		self:Log(("%s asks to %s for %s - approve it once you have the gold."):format(req.name,
+			req.kind == "sit" and "sit down" or "add chips", self:Fmt(req.amount or 0)))
+	end
 	ns.Emit("TABLE_REQUEST", self, req)
 	self:Changed()
 end
@@ -295,7 +363,7 @@ function Table:Approve(req)
 	elseif req.kind == "buy" then
 		self.pending.buys[req.name] = (self.pending.buys[req.name] or 0) + req.amount
 	elseif req.kind == "join" then
-		if InviteUnit then InviteUnit(req.name) elseif C_PartyInfo and C_PartyInfo.InviteUnit then C_PartyInfo.InviteUnit(req.name) end
+		self:Invite(req.name)
 		self:Changed()
 		return
 	end
@@ -354,7 +422,7 @@ function Table:FinishRolls()
 		end
 	end
 	if #players < 2 then
-		Comm.Group("ABORT", self.id, cur.no, self.secret, "not enough players rolled")
+		Comm.Group("ABORT", self.id, cur.no, self.secret, "not enough players were ready")
 		return
 	end
 	table.sort(players)
@@ -363,6 +431,7 @@ function Table:FinishRolls()
 	local deck = Fair.Deck(self.id, cur.no, self.secret, rollStr)
 	local holes, board = Cards.Layout(deck, plan.order)
 	self.dealerBoard = board
+	self.dealerHoles = holes
 	local sealed = {}
 	for _, seat in ipairs(players) do
 		local name = self.engine.seats[seat].name
@@ -392,6 +461,16 @@ function Table:DealerOnEngine(event, a)
 	elseif event == "turn" then
 		local seat, seq = a, h.seq
 		local name = self.engine.seats[seat] and self.engine.seats[seat].name
+		if name and self.bots and self.bots[name] then
+			after(0.8 + math.random() * 1.4, function()
+				local hh = self.engine.hand
+				if hh and hh.no == no and hh.seq == seq and hh.toAct == seat and hh.phase == "betting" then
+					local kind, amount = self:BotDecide(seat)
+					Comm.Deliver(name, "LOCAL", Comm.Join("ACT", self.id, no, seq + 1, kind, amount or 0))
+				end
+			end)
+			return
+		end
 		local quick = name and (self.pending.leaves[name] or self.away and self.away[name])
 		after(quick and 1 or self.cfg.actTimeout, function()
 			local hh = self.engine.hand
@@ -404,6 +483,13 @@ end
 
 function Table:AfterHand()
 	if not self.isDealer then return end
+	if self.bots then
+		for _, s in pairs(self.engine.seats) do
+			if self.bots[s.name] and s.stack < self.cfg.bb then
+				self.pending.buys[s.name] = self.cfg.maxBuy - s.stack
+			end
+		end
+	end
 	after(0.2, function() self:PublishSeats() end)
 	self:MaybeAutoDeal()
 end
@@ -470,7 +556,11 @@ function Table:Roll()
 	local cur = self.cur
 	if not cur or self.phase ~= "rolling" or cur.rolled then return end
 	cur.rolled = true
-	RandomRoll(Table.ROLL_MIN, Table.ROLL_MAX)
+	if self.cfg.entropy == "seed" then
+		Comm.Group("SEED", self.id, cur.no, Fair.NewSecret():sub(1, 16))
+	else
+		RandomRoll(Table.ROLL_MIN, Table.ROLL_MAX)
+	end
 end
 
 ---------------------------------------------------------------------------------------------
@@ -481,12 +571,13 @@ local handlers = {}
 function ns.OnMessage(sender, dist, f)
 	local kind = f[1]
 	if kind == "ADV" or kind == "JOIN" or kind == "ASK" then return ns.Lobby and ns.Lobby.OnMessage(sender, dist, f) end
-	local h = handlers[kind]
-	if not h then return end
 	local t = ns.current
-	if kind == "TBL" then return h(sender, f) end
 	if kind == "HELLO" then
 		if t and t.isDealer and t.phase ~= "closed" then
+			if t.cfg.transport == "practice" then return end
+			if t.cfg.transport == "channel" and not (t.engine:SeatOf(sender) or (t.invited and t.invited[sender])) then
+				return t:HandleJoin(sender)
+			end
 			t:Announce(sender)
 			if not t.engine:InHand() and t.phase == "idle" then
 				Comm.Whisper(sender, "SEATS", t.id, t.handNo, encodeSnapshot(t:CurrentEntries()))
@@ -494,28 +585,91 @@ function ns.OnMessage(sender, dist, f)
 		end
 		return
 	end
+	local h = handlers[kind]
+	if not h then return end
+	if kind == "TBL" then return h(sender, f, dist) end
 	if not t or f[2] ~= t.id then return end
 	return h(t, sender, f, dist)
 end
 
-handlers.TBL = function(sender, f)
+local function parseTbl(sender, f)
+	local cfg = {
+		name = f[3], sb = tonumber(f[4]), bb = tonumber(f[5]), minBuy = tonumber(f[6]), maxBuy = tonumber(f[7]),
+		maxSeats = tonumber(f[8]), mode = f[9], dealerSeated = f[10] == "1", actTimeout = tonumber(f[11]) or 30,
+		transport = (f[14] and f[14] ~= "") and f[14] or "group",
+		channel = (f[15] and f[15] ~= "") and f[15] or nil,
+		password = (f[16] and f[16] ~= "") and f[16] or nil,
+	}
+	if not (cfg.sb and cfg.bb and cfg.maxSeats and Table.MODES[cfg.mode]) then return nil end
+	if cfg.transport == "practice" or (cfg.transport == "channel" and not cfg.channel) then return nil end
+	prepareCfg(cfg)
+	return { id = f[2], dealer = sender, cfg = cfg, handNo = tonumber(f[12]) or 0 }
+end
+
+--- Sit down at (or spectate) a table we were told about.
+function Table.Join(info)
+	local t = ns.current
+	if t and t.phase ~= "closed" and t.id ~= info.id then
+		if t.isDealer then ns.Print("Close your own table first.") return nil end
+		Comm.Group("LEAVE", t.id)
+	end
+	local nt = newTable(info.id, info.dealer, info.cfg)
+	nt.handNo = info.handNo
+	nt.openUI = info.openUI
+	nt.myKey = ns.LoadKey(nt.id)
+	enterTable(nt)
+	if ns.db then ns.db.joined = { dealer = info.dealer, id = info.id } end
+	if info.cfg.transport == "channel" then
+		-- give the channel join a moment, then ask for the seating chart
+		after(2, function() if ns.current == nt then Comm.Whisper(nt.dealer, "HELLO") end end)
+	end
+	nt:Opened()
+	return nt
+end
+
+handlers.TBL = function(sender, f, dist)
 	local t = ns.current
 	if t and t.id == f[2] then
 		t.cfg.name = f[3]
 		return
 	end
-	if t and t.phase ~= "closed" and t.dealer ~= sender then return end -- already at another table
-	local cfg = {
-		name = f[3], sb = tonumber(f[4]), bb = tonumber(f[5]), minBuy = tonumber(f[6]), maxBuy = tonumber(f[7]),
-		maxSeats = tonumber(f[8]), mode = f[9], dealerSeated = f[10] == "1", actTimeout = tonumber(f[11]) or 30,
-	}
-	if not (cfg.sb and cfg.bb and cfg.maxSeats and Table.MODES[cfg.mode]) then return end
-	local nt = newTable(f[2], sender, cfg)
-	nt.handNo = tonumber(f[12]) or 0
-	nt.myKey = ns.LoadKey(nt.id)
-	ns.current = nt
+	local info = parseTbl(sender, f)
+	if not info then return end
+	local wanted = ns.Lobby.wanted and ns.Lobby.wanted[info.id]
+	if info.cfg.transport == "group" then
+		if dist == "WHISPER" and not ns.InGroup(sender) then return end
+		if t and t.phase ~= "closed" and t.dealer ~= sender then return end -- already at another table
+		info.openUI = wanted
+		Table.Join(info)
+		return
+	end
+	-- anywhere tables arrive by whisper: join if we asked, otherwise ask the player first
+	if dist ~= "WHISPER" then return end
+	local asked = wanted or (ns.joinWanted and ns.joinWanted[sender])
+		or (ns.db and ns.db.joined and ns.db.joined.id == info.id)
+	if asked then
+		if ns.joinWanted then ns.joinWanted[sender] = nil end
+		info.openUI = true
+		Table.Join(info)
+	else
+		ns.Emit("TABLE_INVITE", info)
+	end
+end
+
+--- Ask a dealer (by character name) to let us join their table.
+function Table.RequestJoin(dealer)
+	dealer = ns.NormName((dealer or ""):gsub("%s", ""))
+	if not dealer or dealer == "" then return end
+	ns.joinWanted = ns.joinWanted or {}
+	ns.joinWanted[dealer] = true
+	Comm.Whisper(dealer, "JOIN", "")
+	ns.Print(("Asked %s to deal you in. If they're hosting, the table opens in a moment."):format(dealer))
+end
+
+function Table:Opened()
+	local nt, cfg, sender = self, self.cfg, self.dealer
 	nt:Log(("%s is dealing %s: %s/%s no-limit, %s."):format(sender, cfg.name, nt:Fmt(cfg.sb), nt:Fmt(cfg.bb), Table.MODES[cfg.mode]))
-	if cfg.dealerSeated then
+	if cfg.dealerSeated and cfg.transport ~= "practice" then
 		nt:Alert("The dealer is also playing. Their add-on can see every hole card while a hand is live - only play for stakes with people you trust.", "info")
 	end
 	ns.Emit("TABLE_OPENED", nt)
@@ -574,6 +728,8 @@ handlers.CLOSE = function(t, sender, f)
 	t:ApplySnapshot("") -- everyone cashes out
 	t.phase = "closed"
 	t:Log("The table is closed. Open the ledger to settle up.")
+	if t.cfg.channel then after(3, function() Comm.LeaveChannel(t.cfg.channel) end) end
+	if ns.db then ns.db.joined = nil end
 	ns.Emit("TABLE_CLOSED", t)
 	ns.SaveSession(t)
 	t:Changed()
@@ -595,14 +751,27 @@ handlers.HAND = function(t, sender, f)
 	for seat, s in pairs(t.engine.seats) do
 		if not s.sittingOut and s.stack > 0 then cur.eligible[s.name] = seat end
 	end
-	t:Log(("|cffffd100Hand #%d|r - the dealer sealed the deck (%s...). Rolling for the shuffle."):format(no, f[4]:sub(1, 10)))
+	t:Log(("|cffffd100Hand #%d|r - the dealer sealed the deck (%s...). %s"):format(no, f[4]:sub(1, 10),
+		t.cfg.entropy == "seed" and "Collecting shuffle seeds." or "Rolling for the shuffle."))
+	local seeds = t.earlySeeds and t.earlySeeds[no]
+	t.earlySeeds = nil
+	for name, v in pairs(seeds or {}) do t:RecordEntropy(name, v) end
 	local early = t.earlyRolls
 	t.earlyRolls = nil
 	for _, r in ipairs(early or {}) do
 		if GetTime() - r.at <= 5 then t:OnSystem(r.text) end
 	end
+	if t.isDealer and t.bots then
+		for name in pairs(cur.eligible) do
+			if t.bots[name] then
+				after(0.2 + math.random() * 0.6, function()
+					Comm.Deliver(name, "LOCAL", Comm.Join("SEED", t.id, no, Fair.NewSecret():sub(1, 16)))
+				end)
+			end
+		end
+	end
 	if cur.eligible[me()] and t.myKey then
-		if ns.db and ns.db.settings.autoRoll == false then
+		if t.cfg.entropy == "roll" and ns.db and ns.db.settings.autoRoll == false then
 			ns.Emit("TABLE_ROLL_NEEDED", t)
 		else
 			-- roll only once the HAND message (with the seal) has really left our send queue
@@ -640,20 +809,43 @@ function Table:OnSystem(text)
 		end
 		return
 	end
-	if not cur.eligible[name] then return end
+	if not cur.eligible[name] or self.cfg.entropy ~= "roll" then return end
 	if lo ~= Table.ROLL_MIN or hi ~= Table.ROLL_MAX then
 		self:Log(("%s rolled %d-%d - only 1-1000000 counts for the shuffle."):format(name, lo or 0, hi or 0))
 		return
 	end
-	if cur.observed[name] then return end
-	cur.observed[name] = roll
-	self:Log(("  %s rolls |cffffffff%d|r"):format(name, roll))
+	self:RecordEntropy(name, tostring(roll))
+end
+
+--- A player's contribution to this hand's shuffle (a server roll, or a seed their add-on sent).
+function Table:RecordEntropy(name, value)
+	local cur = self.cur
+	if self.phase ~= "rolling" or not cur or not cur.eligible[name] or cur.observed[name] then return end
+	cur.observed[name] = value
+	if self.cfg.entropy == "roll" then
+		self:Log(("  %s rolls |cffffffff%s|r"):format(name, value))
+	end
 	if self.isDealer and self.dealing then
 		local all = true
 		for n in pairs(cur.eligible) do if not cur.observed[n] then all = false break end end
 		if all then after(0.3, function() self:FinishRolls() end) end
 	end
 	self:Changed()
+end
+
+handlers.SEED = function(t, sender, f)
+	if t.cfg.entropy ~= "seed" then return end
+	local no, seed = tonumber(f[3]), f[4]
+	if not no or type(seed) ~= "string" or not seed:match("^%x+$") or #seed ~= 16 then return end
+	local cur = t.cur
+	if cur and cur.no == no then
+		t:RecordEntropy(sender, seed)
+	elseif no == t.handNo + 1 then
+		-- arrived before the HAND message; keep it for a moment
+		t.earlySeeds = t.earlySeeds or {}
+		t.earlySeeds[no] = t.earlySeeds[no] or {}
+		t.earlySeeds[no][sender] = seed
+	end
 end
 
 handlers.DEAL = function(t, sender, f)
@@ -670,15 +862,16 @@ handlers.DEAL = function(t, sender, f)
 		if not name or not cur.eligible[name] then
 			t:Alert(("Dealer dealt in seat %d, which wasn't eligible this hand."):format(seat), "cheat")
 		elseif cur.observed[name] == nil then
-			t:Alert(("You didn't see %s's roll, so you can't confirm it (dealer used %d)."):format(name, v), "warn")
+			t:Alert(("You didn't see %s's shuffle contribution, so you can't confirm it (dealer used %s)."):format(name, v), "warn")
 		elseif cur.observed[name] ~= v then
-			t:Alert(("Dealer used %d for %s, but the server rolled %d!"):format(v, name, cur.observed[name]), "cheat")
+			local src = t.cfg.entropy == "roll" and "the server rolled" or (name .. " sent")
+			t:Alert(("Dealer used %s for %s, but %s %s!"):format(v, name, src, cur.observed[name]), "cheat")
 		end
 	end
 	for name, v in pairs(cur.observed) do
 		local seat = cur.eligible[name]
 		if seat and not rolls[seat] then
-			t:Alert(("%s rolled %d but was left out of the shuffle."):format(name, v), "warn")
+			t:Alert(("%s's shuffle contribution (%s) was left out of the shuffle."):format(name, v), "warn")
 		end
 	end
 	table.sort(players)
@@ -760,7 +953,7 @@ function Table:Audit(no, secret)
 	ns.SaveAudit(entry)
 	if ok then
 		self.stats.verified = self.stats.verified + 1
-		self:Log(("|cff40ff40Hand #%d verified|r - deck matches the sealed commit and the server rolls."):format(no))
+		self:Log(("|cff40ff40Hand #%d verified|r - the deck matches the seal and every player's shuffle contribution."):format(no))
 	else
 		self.stats.failed = self.stats.failed + 1
 		for _, issue in ipairs(issues) do self:Alert(("Hand #%d audit FAILED: %s"):format(no, issue), "cheat") end
@@ -901,7 +1094,7 @@ end
 -- Group roster changes
 ---------------------------------------------------------------------------------------------
 function Table:OnRoster(inGroup)
-	if self.phase == "closed" then return end
+	if self.phase == "closed" or self.cfg.transport ~= "group" then return end
 	if not self.isDealer then
 		if not inGroup(self.dealer) then
 			if self.engine:InHand() then self.engine:Void() end
@@ -923,4 +1116,103 @@ function Table:OnRoster(inGroup)
 			end
 		end
 	end
+end
+
+--- Someone left our table's chat channel (logged off, or /leave). Like leaving the group.
+function Table:OnChannelLeave(name)
+	if self.phase == "closed" or self.cfg.transport ~= "channel" then return end
+	name = ns.NormName(name)
+	if not self.isDealer then
+		if name == self.dealer then
+			if self.engine:InHand() then self.engine:Void() end
+			self:ApplySnapshot("")
+			self.phase = "closed"
+			self:Alert("The dealer left. Table closed; the last hand was voided.", "warn")
+			ns.SaveSession(self)
+			self:Changed()
+		end
+		return
+	end
+	if self.engine:SeatOf(name) and not self.pending.leaves[name] then
+		self.away = self.away or {}
+		self.away[name] = true
+		self:Log(name .. " went offline and will be removed after this hand.")
+		self:Kick(name)
+	end
+end
+
+---------------------------------------------------------------------------------------------
+-- Practice table: goblin bots run on the dealer's own client
+---------------------------------------------------------------------------------------------
+function Table.HostPractice(bots)
+	local cfg = {
+		name = "Practice Table", mode = "fun", transport = "practice", sb = 5, bb = 10,
+		minBuy = 200, maxBuy = 2000, maxSeats = 6, dealerSeated = true, dealerBuyIn = 1000,
+		actTimeout = 60, handPause = 4,
+	}
+	local t, err = Table.Host(cfg)
+	if not t then return nil, err end
+	for i = 1, math.min(bots or 4, cfg.maxSeats - 1) do t:AddBot() end
+	return t
+end
+
+function Table:AddBot()
+	if not self.isDealer or not self.bots then return end
+	local name
+	for _, n in ipairs(Table.BOT_NAMES) do
+		if not self.bots[n] then name = n break end
+	end
+	local seat
+	for i = 1, self.cfg.maxSeats do if self:SeatFree(i) then seat = i break end end
+	if not name or not seat then return end
+	self.bots[name] = true
+	self.keys[name] = Fair.NewSecret():sub(1, 32)
+	self.pending.sits[name] = { seat = seat, amount = self.cfg.maxBuy }
+	self:PublishSeats()
+end
+
+-- rough 0..1 hand strength for a bot
+local function botStrength(hole, board)
+	local a, b = hole[1], hole[2]
+	local ra, rb = math.floor(a / 4), math.floor(b / 4)
+	if #board == 0 then
+		if ra == rb then return 0.5 + ra / 24 end
+		local s = (math.max(ra, rb) + math.min(ra, rb)) / 26
+		if a % 4 == b % 4 then s = s + 0.06 end
+		if math.abs(ra - rb) == 1 then s = s + 0.04 end
+		return s
+	end
+	local cards = { a, b }
+	for _, c in ipairs(board) do cards[#cards + 1] = c end
+	local _, cat = ns.Eval.Eval(cards)
+	local boardCat
+	if #board >= 5 then
+		local _, bc = ns.Eval.Eval(board)
+		boardCat = bc
+	end
+	local base = ({ 0.18, 0.5, 0.68, 0.78, 0.84, 0.88, 0.94, 0.98, 1 })[cat + 1]
+	if boardCat and boardCat >= cat then base = base * 0.6 end -- playing the board
+	return base
+end
+
+function Table:BotDecide(seat)
+	local e = self.engine
+	local h = e.hand
+	local L = e:Legal(seat)
+	local hole = self.dealerHoles and self.dealerHoles[seat]
+	if not L or not hole then return "fold" end
+	local strength = botStrength(hole, h.board)
+	local pot = e:PotTotal()
+	local odds = L.toCall > 0 and L.toCall / (pot + L.toCall) or 0
+	local r = math.random()
+	local function raiseTo(frac)
+		local to = h.currentBet + math.floor((pot + L.toCall) * frac)
+		return math.max(L.minTo, math.min(L.maxTo, to))
+	end
+	if L.canRaise and (strength > 0.82 and r < 0.7 or strength > 0.6 and r < 0.25 or r < 0.05) then
+		return "raise", raiseTo(0.5 + math.random() * 0.5)
+	end
+	if L.check then return "check" end
+	if strength > odds + 0.2 or (strength > 0.4 and r < 0.3) then return "call" end
+	return "fold"
 end

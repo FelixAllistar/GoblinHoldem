@@ -89,7 +89,7 @@ on("GROUP_ROSTER_UPDATE", function()
 		wasInGroup = grouped
 		local t = ns.current
 		if t then t:OnRoster(inGroup) end
-		if t and t.isDealer then t:Announce() end
+		if t and t.isDealer and t.cfg.transport == "group" then t:Announce() end
 	end)
 end)
 
@@ -99,10 +99,24 @@ on("PLAYER_ENTERING_WORLD", function()
 		if ns.db.hosting then
 			local saved = ns.db.hosting
 			ns.db.hosting = nil
-			if wasInGroup and not ns.current then ns.RestoreHosting(saved) end
+			local transport = saved.cfg and saved.cfg.transport or "group"
+			if not ns.current and (wasInGroup or transport ~= "group") then ns.RestoreHosting(saved) end
 		end
-		if wasInGroup and not ns.current then ns.Comm.Group("HELLO") end
+		if not ns.current and ns.db.joined then
+			-- we were at someone's anywhere table before the reload: ask to be dealt back in
+			ns.Comm.Whisper(ns.db.joined.dealer, "HELLO")
+		elseif wasInGroup and not ns.current then
+			ns.Comm.Group("HELLO")
+		end
 	end)
+end)
+
+-- someone left (or logged out of) our table's chat channel
+on("CHAT_MSG_CHANNEL_LEAVE", function(_, playerName, _, channelName, _, _, _, _, baseName)
+	local t = ns.current
+	if not t or not t.cfg.channel or not playerName then return end
+	local chan = (baseName and baseName ~= "" and baseName) or (channelName or ""):gsub("^%d+%.%s*", "")
+	if chan:lower() == t.cfg.channel:lower() then t:OnChannelLeave(playerName) end
 end)
 
 on("PLAYER_LOGOUT", function()
@@ -130,7 +144,7 @@ function ns.SaveHosting(t)
 	end
 	return {
 		id = t.id, cfg = t.cfg, handNo = t.handNo, entries = entries, ledger = t.ledger,
-		keys = t.keys, myKey = t.myKey, secret = t.secret, midHand = midHand, button = t.engine.button,
+		keys = t.keys, myKey = t.myKey, secret = t.secret, midHand = midHand, button = t.engine.button, bots = t.bots,
 		stats = t.stats, autoDeal = t.autoDeal, at = time(),
 	}
 end
@@ -138,7 +152,6 @@ end
 function ns.RestoreHosting(s)
 	if time() - (s.at or 0) > 15 * 60 then return end
 	local t = ns.Table.Restore(s)
-	ns.current = t
 	ns.Emit("TABLE_OPENED", t)
 	t:Log("Table restored after a reload.")
 	t:Announce()
@@ -184,6 +197,19 @@ SlashCmdList.GOBLINHOLDEM = function(msg)
 		if ns.current then ns.TableUI:Toggle() else ns.LobbyUI:Toggle() end
 	elseif cmd == "lobby" or cmd == "host" then
 		ns.LobbyUI:Toggle()
+	elseif cmd == "join" then
+		local name = msg:match("^%s*%S+%s+(%S+)")
+		if not name then return ns.Print("Usage: /holdem join <dealer's name>") end
+		ns.Table.RequestJoin(name)
+	elseif cmd == "invite" then
+		local name = msg:match("^%s*%S+%s+(%S+)")
+		local t = ns.current
+		if not (t and t.isDealer) then return ns.Print("Only the dealer can invite. Host a table first.") end
+		if not name then return ns.Print("Usage: /holdem invite <name>") end
+		t:Invite(name)
+	elseif cmd == "practice" then
+		local t, err = ns.Table.HostPractice(4)
+		if not t then ns.Print(err) end
 	elseif cmd == "table" then
 		if ns.current then ns.TableUI:Show() else ns.Print("You're not at a table. /holdem lobby to find or host one.") end
 	elseif cmd == "ledger" then
@@ -203,7 +229,10 @@ SlashCmdList.GOBLINHOLDEM = function(msg)
 	elseif cmd == "roll" then
 		if ns.current then ns.current:Roll() end
 	elseif cmd == "forget" then
+		if ns.current and ns.current.cfg.channel then ns.Comm.LeaveChannel(ns.current.cfg.channel) end
 		ns.current = nil
+		ns.Comm.SetRoute(nil)
+		ns.db.joined = nil
 		if ns.TableUI.frame then ns.TableUI.frame:Hide() end
 		ns.Print("Forgot the current table.")
 	elseif cmd == "debug" then
@@ -213,11 +242,28 @@ SlashCmdList.GOBLINHOLDEM = function(msg)
 	else
 		ns.Print("/holdem - open the table (or the lobby)")
 		ns.Print("/holdem lobby - find or host a table")
+		ns.Print("/holdem join <name> - join a friend's table, wherever they are")
+		ns.Print("/holdem invite <name> - (dealer) invite someone to your table")
+		ns.Print("/holdem practice - solo table against goblin bots")
 		ns.Print("/holdem ledger | audit | fair - session ledger, hand audits, how the shuffle works")
 		ns.Print("/holdem rolls | sound | autoopen | autoroll - toggles")
 		ns.Print("/holdem forget - drop a stuck table on your side")
 	end
 end
+
+StaticPopupDialogs["GOBLINHOLDEM_INVITED"] = {
+	text = "%s invites you to their Goblin Hold'em table |cffffd100%s|r (%s). Join?",
+	button1 = "Join", button2 = "No thanks", timeout = 60, whileDead = true, hideOnEscape = true,
+	OnAccept = function(_, info)
+		info.openUI = true
+		ns.Table.Join(info)
+	end,
+}
+ns.Listen("TABLE_INVITE", function(info)
+	local c = info.cfg
+	local stakes = ns.Money(c.sb, c.mode, true) .. "/" .. ns.Money(c.bb, c.mode, true) .. " " .. (ns.Table.MODES[c.mode] or "")
+	StaticPopup_Show("GOBLINHOLDEM_INVITED", info.dealer, c.name, stakes, info)
+end)
 
 ns.Listen("TABLE_ROLL_NEEDED", function()
 	ns.Print("Your roll for the shuffle: type |cffffffff/holdem roll|r (auto-roll is off).")

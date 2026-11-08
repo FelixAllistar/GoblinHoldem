@@ -16,22 +16,9 @@ function Lobby.ChannelNum()
 	if id and id > 0 then return id end
 end
 
-function Lobby.HideChannel()
-	if not ChatFrame_RemoveChannel then return end
-	for i = 1, (NUM_CHAT_WINDOWS or 10) do
-		local cf = _G["ChatFrame" .. i]
-		if cf then pcall(ChatFrame_RemoveChannel, cf, Lobby.CHANNEL) end
-	end
-end
-
 function Lobby.EnsureChannel()
 	if Lobby.ChannelNum() then return true end
-	if JoinTemporaryChannel then
-		pcall(JoinTemporaryChannel, Lobby.CHANNEL)
-	elseif JoinChannelByName then
-		pcall(JoinChannelByName, Lobby.CHANNEL)
-	end
-	C_Timer.After(1, Lobby.HideChannel)
+	Comm.JoinChannel(Lobby.CHANNEL)
 	return Lobby.ChannelNum() ~= nil
 end
 
@@ -53,7 +40,7 @@ function Lobby.Advertise(t)
 	local seated = 0
 	for _ in pairs(t.engine.seats) do seated = seated + 1 end
 	send("ADV", t.id, t.cfg.name, t.cfg.sb, t.cfg.bb, seated, t.cfg.maxSeats, t.cfg.mode,
-		t.cfg.dealerSeated and 1 or 0, where(), t.cfg.minBuy, t.cfg.maxBuy)
+		t.cfg.dealerSeated and 1 or 0, where(), t.cfg.minBuy, t.cfg.maxBuy, t.cfg.transport)
 end
 
 function Lobby.Ask()
@@ -92,7 +79,7 @@ function Lobby.OnMessage(sender, dist, f)
 			id = f[2], name = f[3], sb = tonumber(f[4]) or 0, bb = tonumber(f[5]) or 0,
 			seated = tonumber(f[6]) or 0, maxSeats = tonumber(f[7]) or 9, mode = f[8],
 			dealerSeated = f[9] == "1", where = f[10] or "", minBuy = tonumber(f[11]) or 0,
-			maxBuy = tonumber(f[12]) or 0, dealer = sender, seen = GetTime(), via = dist,
+			maxBuy = tonumber(f[12]) or 0, transport = f[13] or "group", dealer = sender, seen = GetTime(), via = dist,
 		}
 		Lobby.tables[e.id] = e
 		ns.Emit("LOBBY_UPDATE")
@@ -104,8 +91,8 @@ function Lobby.OnMessage(sender, dist, f)
 		end
 	elseif kind == "JOIN" then
 		local t = ns.current
-		if t and t.isDealer and t.id == f[2] and t.phase ~= "closed" then
-			t:AddRequest({ kind = "join", name = sender, amount = 0 })
+		if t and t.isDealer and (f[2] == "" or t.id == f[2]) and t.phase ~= "closed" then
+			t:HandleJoin(sender)
 		end
 	end
 end

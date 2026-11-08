@@ -76,7 +76,7 @@ end
 function GH_CheatRolls()
 	local orig = ns.Fair.RollString
 	ns.Fair.RollString = function(rolls)
-		for seat, v in pairs(rolls) do rolls[seat] = v + 1 break end
+		for seat, v in pairs(rolls) do rolls[seat] = tostring(v) .. "7" break end
 		return orig(rolls)
 	end
 end
@@ -94,3 +94,7 @@ function GH_CheatBoard()
 		return orig(self, event, a)
 	end
 end
+
+function GH_JoinByName(dealer) ns.Table.RequestJoin(dealer) end
+function GH_Practice(n) return assert(ns.Table.HostPractice(n)) end
+function GH_InChannel() local t = ns.current return t and t.cfg.channel and GH_CHANNELS[t.cfg.channel] ~= nil end

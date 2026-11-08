@@ -52,7 +52,6 @@ function C_Timer.NewTicker() end
 function GetAddOnMetadata() return "test" end
 function GetRealZoneText() return "Booty Bay" end
 function GetSubZoneText() return "The Salty Sailor Tavern" end
-function GetChannelName() return 0 end
 function IsInGuild() return false end
 NUM_CHAT_WINDOWS = 1
 function ChatFrame_AddMessageEventFilter(ev, fn) GH_FILTER = fn end
@@ -141,7 +140,29 @@ def main():
       assert(saved.entries[1], "hosting save")
       t:Close()
       ns.LedgerUI:Show("ledger")
-      return t.stats.verified, #t.log
+      -- solo practice through the real table window
+      local p = assert(ns.Table.HostPractice(4))
+      ns.TableUI:Refresh()
+      for i = 1, 600 do
+        GH_TIME = GH_TIME + 0.5
+        GH_RunTimers()
+        if ns.TableUI:MyLegal() then ns.TableUI:Preset(0.5) ns.TableUI:Do("call") end
+        ns.TableUI:Refresh()
+        ns.TableUI:OnUpdate(0.5)
+      end
+      assert(p.handNo >= 5, "practice hands: " .. p.handNo)
+      assert(p.stats.failed == 0 and p.stats.verified >= 4, "practice audits")
+      ns.TableUI.inviteBtn:GetScript("OnClick")()
+      p:Close()
+      -- an anywhere table hosted from scratch
+      local a = assert(ns.Table.Host({ name = "Remote", mode = "iou", transport = "channel", sb = 500, bb = 1000,
+        minBuy = 20000, maxBuy = 200000, maxSeats = 9, dealerSeated = true, dealerBuyIn = 100000, actTimeout = 30 }))
+      assert(GH_CHANNELS[a.cfg.channel], "joined table channel")
+      ns.TableUI:Refresh()
+      a:Invite("Buddy")
+      ns.Emit("TABLE_INVITE", { id = "x", dealer = "Buddy", cfg = a.cfg, handNo = 0 })
+      SlashCmdList.GOBLINHOLDEM("join Somebody")
+      return t.stats.verified + p.stats.verified, #t.log
     end""")
     verified, nlog = run(ns)
     print(f"ui smoke: hand verified={verified}, log lines={nlog}")

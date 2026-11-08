@@ -32,3 +32,28 @@ C_ChatInfo = {
 		return true
 	end,
 }
+
+-- chat channels (per client); the router delivers CHANNEL messages to everyone who joined
+GH_GROUPED = true
+function IsInGroup() return GH_GROUPED end
+GH_CHANNELS, GH_CHANNEL_IDS = {}, {}
+local nextChan = 1
+function JoinTemporaryChannel(name, password)
+	if not GH_CHANNELS[name] then
+		GH_CHANNELS[name] = nextChan
+		GH_CHANNEL_IDS[nextChan] = name
+		nextChan = nextChan + 1
+	end
+end
+function GetChannelName(name) return GH_CHANNELS[name] or 0, name end
+function LeaveChannelByName(name) GH_CHANNELS[name] = nil end
+local rawSendAddon = C_ChatInfo.SendAddonMessage
+C_ChatInfo.SendAddonMessage = function(prefix, text, dist, target)
+	if dist == "CHANNEL" then
+		local name = GH_CHANNEL_IDS[target]
+		assert(name and GH_CHANNELS[name], "sending to a channel we are not in")
+		GH_SENT[#GH_SENT + 1] = { prefix = prefix, text = text, dist = dist, target = target, chanName = name }
+		return true
+	end
+	return rawSendAddon(prefix, text, dist, target)
+end

@@ -122,8 +122,8 @@ end
 local HELP = table.concat({
 	"|cffffd100Who shuffles?|r Nobody alone. Each hand:",
 	"1. The dealer's add-on picks a secret and posts its |cffffffffseal|r (a SHA-256 hash). The secret can't be changed after this without everyone noticing.",
-	"2. Every seated player |cffffffff/rolls 1-1000000|r. Rolls are made by the Blizzard server and shown to the whole group, so no one can fake or pick them.",
-	"3. The deck is shuffled from the secret plus all the rolls. The dealer couldn't know the rolls when it sealed, and players don't know the secret, so nobody can steer or predict the cards.",
+	"2. Every seated player adds randomness. At |cffffffffparty/raid|r tables that's a |cffffffff/roll 1-1000000|r made by the Blizzard server, which the whole group sees. At |cffffffffanywhere|r tables each player's add-on sends a random seed over the table channel (the server stamps who sent it).",
+	"3. The deck is shuffled from the secret plus everyone's randomness. The dealer couldn't know it when it sealed, and players don't know the secret, so nobody can steer or predict the cards.",
 	"4. Your hole cards come to you encrypted with a key only you and the dealer's add-on know.",
 	"5. After the hand the secret is revealed. Your add-on re-shuffles the deck itself and checks the seal, every roll, the board and your own cards. Any mismatch shows a red warning to the whole table, and the hand is voided.",
 	" ",

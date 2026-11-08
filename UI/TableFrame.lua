@@ -151,6 +151,12 @@ function UI:Create()
 	ledgerBtn:SetPoint("TOPLEFT", 18, -18)
 	local lobbyBtn = W.Button(f, "Lobby", 70, 22, function() ns.LobbyUI:Toggle() end)
 	lobbyBtn:SetPoint("LEFT", ledgerBtn, "RIGHT", 4, 0)
+	self.inviteBtn = W.Button(f, "Invite", 70, 22, function()
+		local t = T()
+		if not t then return end
+		if t.bots then t:AddBot() else StaticPopup_Show("GOBLINHOLDEM_INVITE_NAME") end
+	end)
+	self.inviteBtn:SetPoint("LEFT", lobbyBtn, "RIGHT", 4, 0)
 
 	-- felt
 	local felt = CreateFrame("Frame", nil, f)
@@ -396,6 +402,21 @@ StaticPopupDialogs["GOBLINHOLDEM_BUYIN"] = {
 	end,
 }
 
+StaticPopupDialogs["GOBLINHOLDEM_INVITE_NAME"] = {
+	text = "Invite who? (character name - they can be anywhere on the realm)",
+	button1 = "Invite", button2 = "Cancel", hasEditBox = true, timeout = 0, whileDead = true, hideOnEscape = true,
+	OnAccept = function(self)
+		local eb = self.editBox or self.EditBox
+		local t = T()
+		if t and eb then t:Invite(eb:GetText()) end
+	end,
+	EditBoxOnEnterPressed = function(self)
+		local parent = self:GetParent()
+		StaticPopupDialogs.GOBLINHOLDEM_INVITE_NAME.OnAccept(parent)
+		parent:Hide()
+	end,
+}
+
 StaticPopupDialogs["GOBLINHOLDEM_LEAVE"] = {
 	text = "Leave the table? If a hand is running you will be folded when it's your turn.",
 	button1 = "Leave", button2 = "Stay", timeout = 0, whileDead = true, hideOnEscape = true,
@@ -441,9 +462,13 @@ function UI:Refresh()
 	local e, h = t.engine, t.engine.hand
 	local c = t.cfg
 	f.headerText:SetText(c.name or "Goblin Hold'em")
-	f.subtitle:SetText(("%s / %s No-Limit  -  %s  -  dealer: %s%s"):format(
-		ns.Money(c.sb, c.mode), ns.Money(c.bb, c.mode), ns.Table.MODES[c.mode] or c.mode, t.dealer,
+	f.subtitle:SetText(("%s / %s No-Limit  -  %s  -  %s  -  dealer: %s%s"):format(
+		ns.Money(c.sb, c.mode), ns.Money(c.bb, c.mode), ns.Table.MODES[c.mode] or c.mode,
+		ns.Table.TRANSPORTS[c.transport] or "", t.dealer,
 		t.phase == "closed" and "  |cffff5050(closed)|r" or ""))
+	local canInvite = t.isDealer and t.phase ~= "closed"
+	self.inviteBtn:SetShown(canInvite)
+	self.inviteBtn:SetText(t.bots and "Add bot" or "Invite")
 	self:PlaceSeats()
 
 	local live = h and h.phase ~= "done"
@@ -460,7 +485,11 @@ function UI:Refresh()
 			local status = ""
 			if t.phase == "rolling" and cur and cur.eligible[seat.name] then
 				local r = cur.observed[seat.name]
-				status = r and ("|cff80ff80rolled " .. r .. "|r") or "|cffaaaaaarolling...|r"
+				if c.entropy == "roll" then
+					status = r and ("|cff80ff80rolled " .. r .. "|r") or "|cffaaaaaarolling...|r"
+				else
+					status = r and "|cff80ff80ready|r" or "|cffaaaaaashuffling...|r"
+				end
 			elseif seat.sittingOut then status = "|cff999999Sitting out|r"
 			elseif inHand and h.folded[i] then status = "|cff999999Folded|r"
 			elseif inHand and h.allin[i] then status = "|cffff8040All-in|r"
@@ -518,7 +547,7 @@ function UI:Refresh()
 	if t.phase == "rolling" and cur then
 		local n, got = 0, 0
 		for name in pairs(cur.eligible) do n = n + 1 if cur.observed[name] then got = got + 1 end end
-		self.message:SetText(("Rolling for the shuffle  %d / %d"):format(got, n))
+		self.message:SetText((c.entropy == "roll" and "Rolling for the shuffle  %d / %d" or "Shuffling  %d / %d ready"):format(got, n))
 	elseif t.phase == "closed" then
 		self.message:SetText("Table closed - see the ledger to settle up")
 	elseif not h or h.phase == "done" then
@@ -573,7 +602,11 @@ function UI:SealTooltip(owner)
 	if not t then return end
 	GameTooltip:SetOwner(owner, "ANCHOR_BOTTOMLEFT")
 	GameTooltip:AddLine("Sealed deck", 1, 0.82, 0)
-	GameTooltip:AddLine("Before each hand the dealer publishes a seal (a hash of a secret). Then every player /rolls 1-1000000 - those rolls come from the Blizzard server. The deck is shuffled from the secret plus all the rolls.", 1, 1, 1, true)
+	if t.cfg.entropy == "roll" then
+		GameTooltip:AddLine("Before each hand the dealer publishes a seal (a hash of a secret). Then every player /rolls 1-1000000 - those rolls come from the Blizzard server. The deck is shuffled from the secret plus all the rolls.", 1, 1, 1, true)
+	else
+		GameTooltip:AddLine("Before each hand the dealer publishes a seal (a hash of a secret). Then every player's add-on sends a random seed. The deck is shuffled from the secret plus all the seeds, so the dealer can't steer it and nobody can predict it.", 1, 1, 1, true)
+	end
 	GameTooltip:AddLine("When the hand ends the dealer reveals the secret and your add-on re-shuffles the deck itself and checks the seal, the rolls, the board and your own cards.", 1, 1, 1, true)
 	local cur = t.cur
 	if cur then
@@ -633,7 +666,7 @@ function UI:RefreshButtons()
 	if t.phase == "closed" then info = "The table is closed."
 	elseif acting then info = "|cffffd100Your turn.|r"
 	elseif h and h.phase == "betting" and h.toAct then info = "Waiting for " .. t:Name(h.toAct) .. "..."
-	elseif t.phase == "rolling" then info = "Rolling for the shuffle..."
+	elseif t.phase == "rolling" then info = c.entropy == "roll" and "Rolling for the shuffle..." or "Shuffling..."
 	elseif not mySeat then info = "Spectating - click an open seat to sit down."
 	else info = t.isDealer and (t.autoDeal and "Next hand starts shortly." or "Press Deal to start the next hand.") or "Waiting for the next hand..." end
 	p.info:SetText(info)
@@ -729,8 +762,7 @@ end
 
 ns.Listen("TABLE_OPENED", function(t)
 	UI.lastAction, UI.shown, UI.winners, UI.resultText = {}, {}, {}, nil
-	local wanted = ns.Lobby and ns.Lobby.wanted and ns.Lobby.wanted[t.id]
-	if t.isDealer or wanted or (ns.db and ns.db.settings.autoOpen) then
+	if t.isDealer or t.openUI or (ns.db and ns.db.settings.autoOpen) then
 		UI:Show()
 	else
 		ns.Print(("%s opened a table in your group: |cffffd100%s|r. Type |cffffffff/holdem|r to watch or sit down."):format(t.dealer, t.cfg.name))

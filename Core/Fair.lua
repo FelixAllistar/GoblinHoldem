@@ -1,8 +1,9 @@
 -- "Sealed deck" fairness protocol.
 --
 --  1. Dealer picks a secret and broadcasts commit = SHA256("GH1|commit|" .. secret). Sealed.
---  2. Every seated player /rolls 1-1000000. The roll is made by the Blizzard server, so nobody
---     (dealer included) can choose it, and everyone in the group sees the same system message.
+--  2. Every seated player contributes randomness. At party/raid tables that's a /roll 1-1000000,
+--     made by the Blizzard server, which everyone in the group sees. At "anywhere" tables each
+--     player's add-on sends a random seed over the table channel (the server stamps who sent it).
 --  3. seed = SHA256(table | hand | secret | all rolls); deck = Fisher-Yates(seed).
 --     The dealer committed before the rolls existed, so it cannot steer the deck; players
 --     cannot predict it because they do not know the secret.
@@ -67,7 +68,7 @@ end
 
 function Fair.ParseRolls(str)
 	local rolls = {}
-	for seat, v in (str or ""):gmatch("(%d+)=(%d+)") do rolls[tonumber(seat)] = tonumber(v) end
+	for seat, v in (str or ""):gmatch("(%d+)=(%w+)") do rolls[tonumber(seat)] = v end
 	return rolls
 end
 

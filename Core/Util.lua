@@ -92,3 +92,6 @@ function ns.ParseMoney(text, mode)
 	end
 	return math.floor(total + 0.5)
 end
+
+--- Is `name` in our party/raid? (Init.lua replaces this with the real roster check.)
+function ns.InGroup(name) return true end
