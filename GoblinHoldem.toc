@@ -2,7 +2,7 @@
 ## Title: |cffffd100Goblin Hold'em|r
 ## Notes: No-limit Texas Hold'em with friends anywhere on the realm, your party, or solo vs bots. Sealed shuffle every player audits.
 ## Author: FelixAllistar
-## Version: 0.2.0
+## Version: 0.3.0
 ## IconTexture: Interface\Icons\INV_Misc_Coin_04
 ## SavedVariables: GoblinHoldemDB
 
@@ -22,3 +22,5 @@ UI\Widgets.lua
 UI\TableFrame.lua
 UI\LobbyFrame.lua
 UI\LedgerFrame.lua
+UI\MiniFrame.lua
+UI\Minimap.lua

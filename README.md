@@ -37,6 +37,29 @@ At the table you get Fold / Check / Call / Bet / Raise, a raise slider, and ½-p
 all-in buttons. **Ledger & Audit** shows who's up and down, who pays whom, and the audit of every
 hand.
 
+### Playing while you're busy
+
+- **Minimap coin:** left-click opens or closes the game, right-click opens settings, drag moves it.
+  It glows when it's your turn.
+- **Mini HUD:** a small bar with your cards, the board, the pot and Fold / Call / ½ Pot / Pot.
+  It pops up by itself when it's your turn, so you can keep the big table closed while questing.
+- **Queued actions:** when it isn't your turn, Fold and Call turn into "Auto check/fold" and
+  "Auto call". Click one and it plays for you when the turn arrives. A queued call is dropped if
+  someone raises.
+- **Key bindings:** Esc → Key Bindings → AddOns → Goblin Hold'em has open/close, fold and check/call.
+- **Timing out sits you out.** If the clock runs out you check or fold, and you're sat out until you
+  click **I'm back**, so you don't bleed blinds or stall the table every hand. The host sets the
+  turn timer (default 45 seconds, `0` for no timer). The dealer can right-click a seat to skip a
+  stalled turn; everyone is told it was a skip.
+- **Safety nets:** going all-in for gold asks first, and Fold checks instead when checking is free.
+
+### Debts and history
+
+**Ledger & Audit** has two more tabs. **Debts** keeps a running total per person across finished
+gold tables ("Thrall owes you 3g"), with a Settled button once the gold has changed hands.
+**History** lists your past tables and what you won or lost. Every table is saved after each hand,
+so a crash or disconnect doesn't lose the record.
+
 ### Game types
 
 | Type | Chips are | Money moves |
@@ -108,6 +131,10 @@ for a sealed shuffle keeps the cards secret, needs a handful of rolls, and can't
 /holdem practice   solo table against goblin bots
 /holdem join Name  join a friend's table, wherever they are
 /holdem invite Name  (dealer) invite someone to your table
+/holdem mini       small HUD (/holdem full for the big table)
+/holdem settings   options (same as right-clicking the minimap coin)
+/holdem debts      who owes whom across sessions
+/holdem history    past tables
 /holdem ledger     session ledger and settle-up
 /holdem audit      per-hand audit trail and alerts
 /holdem fair       how the shuffle works

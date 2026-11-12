@@ -23,7 +23,6 @@ function GH_Bot(style)
 	if t.phase ~= "playing" then return false end
 	local h, seat = t.engine.hand, t:MySeat()
 	if not h or not seat or h.toAct ~= seat or h.phase ~= "betting" then return false end
-	if t.sentSeq == h.seq + 1 and t.sentNo == h.no then return false end -- already sent, waiting
 	local L = t.engine:Legal(seat)
 	local r = math.random()
 	if style == "afk" then return false end
@@ -33,7 +32,6 @@ function GH_Bot(style)
 		local amt = r > 0.98 and L.maxTo or (L.minTo + math.floor(math.random() * (L.maxTo - L.minTo) * 0.3))
 		t:Act("raise", amt)
 	else t:Act(L.check and "check" or "call") end
-	t.sentSeq, t.sentNo = h.seq + 1, h.no
 	return true
 end
 
@@ -98,3 +96,10 @@ end
 function GH_JoinByName(dealer) ns.Table.RequestJoin(dealer) end
 function GH_Practice(n) return assert(ns.Table.HostPractice(n)) end
 function GH_InChannel() local t = ns.current return t and t.cfg.channel and GH_CHANNELS[t.cfg.channel] ~= nil end
+
+function GH_SittingOut(name)
+	local t = ns.current
+	local seat = t.engine:SeatOf(name)
+	return seat ~= nil and t.engine.seats[seat].sittingOut == true
+end
+function GH_Phase() return ns.current.phase .. "/" .. tostring(ns.current.engine.hand and ns.current.engine.hand.phase) end

@@ -134,6 +134,7 @@ def run_simulation(new_runtime):
     play(w, 3, fails, styles={"Vol": "afk"})
     st = w.states()
     check(len(set(st.values())) == 1, "agree after AFK timeouts", fails)
+    check(all(c.g.GH_SittingOut("Vol") for c in w.clients.values()), "AFK player was sat out for everyone", fails)
 
     # A player leaves; they are cashed out and the rest continue
     w.clients["Rexxar"].run("GH_T():Leave()")
@@ -200,6 +201,19 @@ def run_simulation(new_runtime):
         check(not bad, f"anywhere {n}: unexpected alerts {bad[:3]}", fails)
         stacks, buy = c.g.GH_Total()
         check(stacks == buy, f"anywhere {n}: chips conserved ({stacks} vs {buy})", fails)
+    # the dealer vanishes mid-hand: players' watchdog voids the hand and closes the table
+    ally = w4.clients["Ally"]
+    if "playing" in ally.g.GH_Phase() and "done" not in ally.g.GH_Phase():
+        before = ally.g.GH_Total()
+        del w4.clients["Host"]
+        for _ in range(400):
+            w4.step()
+        for c in w4.clients.values():
+            c.g.GH_T().Watchdog(c.g.GH_T())
+        check(all(c.g.GH_T().phase == "closed" for c in w4.clients.values()), "watchdog closed the table after the dealer vanished", fails)
+    else:
+        print("(watchdog check skipped: no live hand)", ally.g.GH_Phase())
+
     # a stranger who wasn't invited can't get the channel password by whispering HELLO
     w4b = World(new_runtime, ["Host2", "Stranger"], seed=22)
     for c in w4b.clients.values():

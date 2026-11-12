@@ -54,6 +54,10 @@ function GetRealZoneText() return "Booty Bay" end
 function GetSubZoneText() return "The Salty Sailor Tavern" end
 function IsInGuild() return false end
 NUM_CHAT_WINDOWS = 1
+Minimap = CreateFrame("Frame")
+UIErrorsFrame = CreateFrame("Frame")
+function GetCursorPosition() return 0, 0 end
+function date(fmt, t) return os.date(fmt, t) end
 function ChatFrame_AddMessageEventFilter(ev, fn) GH_FILTER = fn end
 """
 
@@ -86,7 +90,8 @@ def main():
     """)
     run = L.eval(r"""function(ns)
       -- ADDON_LOADED equivalent
-      GoblinHoldemDB = { settings = { autoRoll = true, hideRolls = true, sound = true, autoOpen = false }, frames = {}, keys = {}, audit = {}, sessions = {} }
+      GoblinHoldemDB = { settings = { autoRoll = true, hideRolls = true, sound = true, autoOpen = false, confirmAllIn = true, turnPopup = true, mini = false, minimap = true, scale = 1 },
+        frames = {}, keys = {}, audit = {}, sessions = {}, debts = {}, minimapAngle = 215 }
       ns.db = GoblinHoldemDB
       ns.LobbyUI:Toggle()
       ns.LobbyUI:SetMode("bank")
@@ -140,15 +145,37 @@ def main():
       assert(saved.entries[1], "hosting save")
       t:Close()
       ns.LedgerUI:Show("ledger")
+      -- gold table closed: session saved, debts written, tabs render
+      assert(#ns.db.sessions == 1 and ns.db.sessions[1].final, "session saved")
+      ns.Ledger.AddDebt("Thrall", 12345, "test")
+      ns.LedgerUI:Show("debts") ns.LedgerUI:Show("history")
+      ns.LedgerUI.debtRows[1].btn:GetScript("OnClick")()
+      assert(ns.db.debts.Thrall.amount == 0, "debt settled")
+      ns.MinimapButton:Update()
+      local mb = ns.MinimapButton.button
+      mb:GetScript("OnEnter")(mb) mb:GetScript("OnUpdate")(mb, 0.1)
+      mb:GetScript("OnClick")(mb, "RightButton")
+      ns.SettingsUI:Refresh()
+      SlashCmdList.GOBLINHOLDEM("mini")
+      ns.MiniUI:Refresh()
       -- solo practice through the real table window
       local p = assert(ns.Table.HostPractice(4))
       ns.TableUI:Refresh()
       for i = 1, 600 do
         GH_TIME = GH_TIME + 0.5
         GH_RunTimers()
-        if ns.TableUI:MyLegal() then ns.TableUI:Preset(0.5) ns.TableUI:Do("call") end
-        ns.TableUI:Refresh()
+        if ns.TableUI:MyLegal() then
+          ns.TableUI:Preset(0.5)
+          if i % 7 == 0 then ns.MiniUI:Raise(0.5) elseif i % 5 == 0 then ns.TableUI:Do("fold") else ns.TableUI:Do("call") end
+        elseif i % 3 == 0 then
+          ns.TableUI:Do(i % 2 == 0 and "call" or "fold") -- queue an automatic action
+        end
+        if i == 300 then ns.TableUI:Show() end
+        if i == 450 then ns.MiniUI:Show() end
+        ns.TableUI:Refresh() ns.MiniUI:Refresh()
         ns.TableUI:OnUpdate(0.5)
+        local mf = ns.MiniUI.frame
+        if mf then mf:GetScript("OnUpdate")(mf, 0.5) end
       end
       assert(p.handNo >= 5, "practice hands: " .. p.handNo)
       assert(p.stats.failed == 0 and p.stats.verified >= 4, "practice audits")

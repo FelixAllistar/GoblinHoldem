@@ -72,7 +72,7 @@ local function createSeat(felt, i)
 			GameTooltip:AddDoubleLine("Session", ns.Money(seat.stack + (L.out or 0) - L.buyIn, t.cfg.mode), 0.8, 0.8, 0.8, 1, 1, 1)
 		end
 		if t.isDealer and seat.name ~= me() then
-			GameTooltip:AddLine("Right-click: remove from table", 0.6, 0.6, 0.6)
+			GameTooltip:AddLine("Right-click: skip their turn / remove from table", 0.6, 0.6, 0.6)
 		end
 		GameTooltip:Show()
 	end)
@@ -81,7 +81,8 @@ local function createSeat(felt, i)
 	s:SetScript("OnMouseUp", function(_, button)
 		local t = T()
 		if button == "RightButton" and t and t.isDealer and t.engine.seats[i] and t.engine.seats[i].name ~= me() then
-			t:Kick(t.engine.seats[i].name)
+			local name = t.engine.seats[i].name
+			StaticPopup_Show("GOBLINHOLDEM_SEAT", name, nil, { name = name, seat = i })
 		end
 	end)
 	return s
@@ -157,6 +158,15 @@ function UI:Create()
 		if t.bots then t:AddBot() else StaticPopup_Show("GOBLINHOLDEM_INVITE_NAME") end
 	end)
 	self.inviteBtn:SetPoint("LEFT", lobbyBtn, "RIGHT", 4, 0)
+	local miniBtn = W.Button(f, "Mini", 54, 22, function()
+		if ns.db then ns.db.settings.mini = true end
+		ns.MiniUI:Show()
+	end)
+	miniBtn:SetPoint("TOPRIGHT", -34, -18)
+	W.Tooltip(miniBtn, function(tt)
+		tt:AddLine("Mini HUD", 1, 0.82, 0)
+		tt:AddLine("A small bar with your cards, the board and Fold / Call / Raise - so you can keep questing.", 1, 1, 1, true)
+	end)
 
 	-- felt
 	local felt = CreateFrame("Frame", nil, f)
@@ -252,6 +262,10 @@ function UI:CreateActions(f)
 
 	p.fold = W.Button(p, "Fold", 110, 30, function() UI:Do("fold") end)
 	p.fold:SetPoint("TOPLEFT", 10, -30)
+	p.back = W.Button(p, "I'm back", 110, 30, function() local t = T() if t then t:SitOut(false) end end)
+	p.back:SetAllPoints(p.fold)
+	p.back:SetFrameLevel(p.fold:GetFrameLevel() + 2)
+	p.back:Hide()
 	p.call = W.Button(p, "Check", 150, 30, function() UI:Do("call") end)
 	p.call:SetPoint("LEFT", p.fold, "RIGHT", 6, 0)
 	p.raise = W.Button(p, "Raise", 190, 30, function() UI:Do("raise") end)
@@ -344,29 +358,81 @@ function UI:SetRaise(v, fromSlider)
 	self:RefreshButtons()
 end
 
-function UI:Preset(kind)
+function UI:PresetAmount(kind)
 	local L, seat, t = self:MyLegal()
-	if not L then return end
-	if kind == "min" then return self:SetRaise(L.minTo) end
-	if kind == "max" then return self:SetRaise(L.maxTo) end
+	if not L then return nil end
+	if kind == "min" then return L.minTo end
+	if kind == "max" then return L.maxTo end
 	local h = t.engine.hand
 	local pot = t.engine:PotTotal() + L.toCall
-	self:SetRaise(h.currentBet + math.floor(pot * kind))
+	return math.max(L.minTo, math.min(L.maxTo, h.currentBet + math.floor(pot * kind)))
 end
 
-function UI:Do(kind)
+function UI:Preset(kind)
+	local amount = self:PresetAmount(kind)
+	if amount then self:SetRaise(amount) end
+end
+
+--- Can we queue an action for later (in the hand, with chips, not on the clock)? -> ok, owed
+function UI:QueueInfo()
+	local t = T()
+	local h = t and t.engine.hand
+	local seat = t and t:MySeat()
+	if not (h and seat and t.phase == "playing" and h.phase ~= "done" and h.inHand[seat] and t.engine:CanAct(seat)) then return false, 0 end
+	if h.phase == "betting" and h.toAct == seat then return false, 0 end
+	return true, math.max(0, math.min(t.engine.seats[seat].stack, h.currentBet - h.bet[seat]))
+end
+
+StaticPopupDialogs["GOBLINHOLDEM_ALLIN"] = {
+	text = "Go ALL-IN for %s?",
+	button1 = "All-in", button2 = "Cancel", timeout = 20, whileDead = true, hideOnEscape = true,
+	OnAccept = function(_, data)
+		local t = T()
+		if t and t.engine.hand and t.engine.hand.seq == data.seq then
+			UI.confirmed = true
+			UI:Do("raise", data.amount)
+		end
+	end,
+}
+
+--- kind: "fold" | "call" (check or call) | "raise". Off-turn, fold/call queue an automatic action.
+function UI:Do(kind, amount)
 	local L, seat, t = self:MyLegal()
-	if not L then return end
-	if kind == "call" then kind = L.check and "check" or "call" end
-	local ok, err
-	if kind == "raise" then
-		ok, err = t:Act("raise", self.raiseTo or L.minTo)
-	else
-		ok, err = t:Act(kind)
+	if not L then
+		t = T()
+		if t and self:QueueInfo() and (kind == "fold" or kind == "call") then
+			t:SetPre(kind == "fold" and "checkfold" or "call")
+			W.Sound("click")
+		end
+		return
 	end
+	if kind == "call" then kind = L.check and "check" or "call" end
+	if kind == "fold" and L.check then
+		kind = "check"
+		ns.Print("Checked instead of folding - it was free.")
+	end
+	if kind == "raise" then
+		if not L.canRaise then return end
+		amount = math.max(L.minTo, math.min(L.maxTo, math.floor(amount or self.raiseTo or L.minTo)))
+		local confirm = ns.db and ns.db.settings.confirmAllIn and t.cfg.mode ~= "fun"
+		if amount >= L.maxTo and confirm and not self.confirmed then
+			StaticPopup_Show("GOBLINHOLDEM_ALLIN", ns.Money(amount, t.cfg.mode, true), nil, { amount = amount, seq = t.engine.hand.seq })
+			return
+		end
+	end
+	self.confirmed = nil
+	local ok, err = t:Act(kind, amount)
 	if not ok then ns.Print(err) end
 	W.Sound(kind == "fold" and "click" or "chips")
 end
+
+StaticPopupDialogs["GOBLINHOLDEM_SEAT"] = {
+	text = "%s",
+	button1 = "Remove from table", button2 = "Cancel", button3 = "Skip their turn",
+	timeout = 0, whileDead = true, hideOnEscape = true,
+	OnAccept = function(_, data) local t = T() if t then t:Kick(data.name) end end,
+	OnAlt = function(_, data) local t = T() if t then t:Nudge(data.seat) end end,
+}
 
 function UI:OnSeatClick(i)
 	local t = T()
@@ -500,7 +566,7 @@ function UI:Refresh()
 			s.status:SetText(status)
 			local active = live and h.phase == "betting" and h.toAct == i
 			if active then s:SetBackdropBorderColor(1, 0.85, 0.15, 1) else s:SetBackdropBorderColor(0.75, 0.6, 0.3, 1) end
-			s.timer:SetShown(active and true or false)
+			s.timer:SetShown(active and (c.actTimeout or 0) > 0 and true or false)
 			-- cards
 			local show = self.shown[i]
 			local mine = (seat.name == me()) and cur and cur.myHole and cur.no == (h and h.no)
@@ -656,22 +722,65 @@ function UI:RefreshButtons()
 			p.raise:SetText("Raise")
 			p.raise:SetEnabled(false)
 		end
+		p.fold:SetText("Fold")
+		p.fold:UnlockHighlight()
+		p.call:UnlockHighlight()
 	else
-		p.call:SetText("Check / Call")
+		local canQueue, owe = self:QueueInfo()
+		local pre = t.preAction
+		p.fold:SetEnabled(canQueue)
+		p.call:SetEnabled(canQueue)
+		if canQueue then
+			p.fold:SetText("Auto check/fold")
+			p.call:SetText(owe > 0 and ("Auto call " .. ns.Money(owe, c.mode, true)) or "Auto check")
+			if pre and pre.kind == "checkfold" then p.fold:LockHighlight() else p.fold:UnlockHighlight() end
+			if pre and pre.kind == "call" then p.call:LockHighlight() else p.call:UnlockHighlight() end
+		else
+			p.fold:SetText("Fold")
+			p.call:SetText("Check / Call")
+			p.fold:UnlockHighlight()
+			p.call:UnlockHighlight()
+		end
 		p.raise:SetText("Bet / Raise")
 	end
 
-	-- info line
+	local info, handText = self:InfoText()
+	p.info:SetText(info)
+	p.hand:SetText(handText)
+	p.back:SetShown(mySeat ~= nil and t.engine.seats[mySeat].sittingOut and t.phase ~= "closed")
+
+	-- seat/dealer controls
+	p.sitout:SetShown(mySeat ~= nil and t.phase ~= "closed")
+	if mySeat then p.sitout:SetChecked(t.engine.seats[mySeat].sittingOut) end
+	p.addChips:SetShown(mySeat ~= nil and t.phase ~= "closed")
+	p.leave:SetShown(mySeat ~= nil and t.phase ~= "closed" and not t.leaving)
+	local dealer = t.isDealer and t.phase ~= "closed"
+	p.deal:SetShown(dealer)
+	p.deal:SetEnabled(dealer and t:CanDeal() or false)
+	p.auto:SetShown(dealer)
+	if dealer then p.auto:SetChecked(t.autoDeal) end
+	p.requests:SetShown(dealer)
+	if dealer then p.requests:SetText(("Requests (%d)"):format(#t.requests)) end
+	p.closeTable:SetShown(dealer)
+end
+
+--- One-line status for me, and a description of my hand.
+function UI:InfoText()
+	local t = T()
+	if not t then return "You're not at a table.", "" end
+	local c, h, mySeat = t.cfg, t.engine.hand, t:MySeat()
+	local L = self:MyLegal()
 	local info
 	if t.phase == "closed" then info = "The table is closed."
-	elseif acting then info = "|cffffd100Your turn.|r"
+	elseif L then
+		info = "|cffffd100Your turn|r - " .. (L.check and "check or bet." or ("call " .. ns.Money(L.toCall, c.mode, true) .. ", raise or fold."))
+	elseif mySeat and t.engine.seats[mySeat].sittingOut then info = "|cffffa040You're sitting out.|r Click I'm back to play."
 	elseif h and h.phase == "betting" and h.toAct then info = "Waiting for " .. t:Name(h.toAct) .. "..."
 	elseif t.phase == "rolling" then info = c.entropy == "roll" and "Rolling for the shuffle..." or "Shuffling..."
 	elseif not mySeat then info = "Spectating - click an open seat to sit down."
+	elseif t.engine.seats[mySeat].stack == 0 then info = "|cffffa040You're out of chips.|r Add chips to keep playing."
 	else info = t.isDealer and (t.autoDeal and "Next hand starts shortly." or "Press Deal to start the next hand.") or "Waiting for the next hand..." end
-	p.info:SetText(info)
 
-	-- hand strength
 	local cur = t.cur
 	local text = ""
 	if cur and cur.myHole and h and h.no == cur.no and h.inHand[mySeat or 0] then
@@ -690,21 +799,17 @@ function UI:RefreshButtons()
 			end
 		end
 	end
-	p.hand:SetText(text)
+	return info, text
+end
 
-	-- seat/dealer controls
-	p.sitout:SetShown(mySeat ~= nil and t.phase ~= "closed")
-	if mySeat then p.sitout:SetChecked(t.engine.seats[mySeat].sittingOut) end
-	p.addChips:SetShown(mySeat ~= nil and t.phase ~= "closed")
-	p.leave:SetShown(mySeat ~= nil and t.phase ~= "closed" and not t.leaving)
-	local dealer = t.isDealer and t.phase ~= "closed"
-	p.deal:SetShown(dealer)
-	p.deal:SetEnabled(dealer and t:CanDeal() or false)
-	p.auto:SetShown(dealer)
-	if dealer then p.auto:SetChecked(t.autoDeal) end
-	p.requests:SetShown(dealer)
-	if dealer then p.requests:SetText(("Requests (%d)"):format(#t.requests)) end
-	p.closeTable:SetShown(dealer)
+--- Fraction of the turn clock left for whoever is acting (nil when there's no clock running).
+function UI:TurnFraction()
+	local t = T()
+	local h = t and t.engine.hand
+	if not h or h.phase ~= "betting" or not h.toAct then return nil end
+	local timer = t.cfg.actTimeout or 0
+	if timer <= 0 then return nil end
+	return math.max(0, 1 - (GetTime() - (t.turnAt or GetTime())) / timer), h.toAct
 end
 
 ---------------------------------------------------------------------------------------------
@@ -719,23 +824,12 @@ function UI:OnUpdate(elapsed)
 	end
 	if acc < 0.05 then return end
 	acc = 0
-	local t = T()
-	local h = t and t.engine.hand
-	if not h or h.phase ~= "betting" or not h.toAct then return end
-	local key = h.no .. ":" .. h.seq .. ":" .. h.toAct
-	if key ~= self.turnKey then
-		self.turnKey = key
-		self.turnStart = GetTime()
-		if h.toAct == t:MySeat() then
-			W.Sound("turn")
-			if FlashClientIcon then pcall(FlashClientIcon) end
-		end
-	end
-	local frac = 1 - (GetTime() - self.turnStart) / (t.cfg.actTimeout or 30)
-	local s = self.seats[h.toAct]
-	if s then
-		s.timer:SetValue(math.max(0, frac))
-		if frac < 0.25 then s.timer:SetStatusBarColor(1, 0.2, 0.1) else s.timer:SetStatusBarColor(1, 0.75, 0.1) end
+	local frac, seat = self:TurnFraction()
+	if not seat then return end
+	local st = self.seats[seat]
+	if st then
+		st.timer:SetValue(frac or 1)
+		if frac and frac < 0.25 then st.timer:SetStatusBarColor(1, 0.2, 0.1) else st.timer:SetStatusBarColor(1, 0.75, 0.1) end
 	end
 end
 
@@ -743,6 +837,8 @@ function UI:MarkDirty() self.dirty = true end
 
 function UI:Show()
 	self:Create()
+	if ns.MiniUI.frame then ns.MiniUI.frame:Hide() end
+	self.frame:SetScale(ns.db and ns.db.settings.scale or 1)
 	self.frame:Show()
 	self:ReloadLog()
 	self:Refresh()

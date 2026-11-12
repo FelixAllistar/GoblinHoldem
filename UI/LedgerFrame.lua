@@ -12,7 +12,7 @@ function UI:Create()
 	if self.frame then return self.frame end
 	local f = CreateFrame("Frame", "GoblinHoldemLedger", UIParent, W.BACKDROP_TEMPLATE)
 	self.frame = f
-	f:SetSize(340, 520)
+	f:SetSize(440, 520)
 	f:SetFrameStrata("HIGH")
 	W.Backdrop(f, "dialog")
 	W.Header(f, "Ledger", 220)
@@ -24,8 +24,8 @@ function UI:Create()
 
 	self.tabs = {}
 	local prev
-	for _, tab in ipairs({ { "ledger", "Ledger" }, { "audit", "Audit" }, { "help", "How it's fair" } }) do
-		local b = W.Button(f, tab[2], 98, 22, function() UI:Show(tab[1]) end)
+	for _, tab in ipairs({ { "ledger", "Ledger" }, { "debts", "Debts" }, { "history", "History" }, { "audit", "Audit" }, { "help", "Fair?" } }) do
+		local b = W.Button(f, tab[2], 76, 22, function() UI:Show(tab[1]) end)
 		if prev then b:SetPoint("LEFT", prev, "RIGHT", 4, 0) else b:SetPoint("TOPLEFT", 18, -28) end
 		prev = b
 		self.tabs[tab[1]] = b
@@ -35,16 +35,94 @@ function UI:Create()
 	scroll:SetPoint("TOPLEFT", 18, -58)
 	scroll:SetPoint("BOTTOMRIGHT", -36, 18)
 	local content = CreateFrame("Frame", nil, scroll)
-	content:SetSize(280, 10)
+	content:SetSize(380, 10)
 	scroll:SetScrollChild(content)
 	self.text = W.Text(content, 12, W.FONT)
 	self.text:SetPoint("TOPLEFT")
-	self.text:SetWidth(280)
+	self.text:SetWidth(380)
 	self.text:SetJustifyH("LEFT")
 	self.text:SetSpacing(2)
 	self.content = content
+	self.scroll = scroll
+
+	-- debts tab: one row per person with a "Settled" button
+	self.debtRows = {}
+	for i = 1, 12 do
+		local r = CreateFrame("Frame", nil, f)
+		r:SetSize(396, 24)
+		r:SetPoint("TOPLEFT", 22, -84 - (i - 1) * 26)
+		r.text = W.Text(r, 12)
+		r.text:SetPoint("LEFT")
+		r.text:SetWidth(300)
+		r.text:SetJustifyH("LEFT")
+		r.text:SetWordWrap(false)
+		r.btn = W.Button(r, "Settled", 76, 20)
+		r.btn:SetPoint("RIGHT")
+		r:EnableMouse(true)
+		r:Hide()
+		self.debtRows[i] = r
+	end
+	self.debtHead = W.Text(f, 12)
+	self.debtHead:SetPoint("TOPLEFT", 22, -60)
+	self.debtHead:SetWidth(396)
+	self.debtHead:SetJustifyH("LEFT")
+	self.debtHead:SetTextColor(0.8, 0.7, 0.5)
 	f:Hide()
 	return f
+end
+
+function UI:RefreshDebts()
+	local list = {}
+	for name, d in pairs(ns.db and ns.db.debts or {}) do
+		if d.amount ~= 0 then list[#list + 1] = { name = name, d = d } end
+	end
+	table.sort(list, function(a, b) return math.abs(a.d.amount) > math.abs(b.d.amount) end)
+	self.debtHead:SetText(#list == 0 and "Nobody owes anybody. Debts are added here when a gold table ends."
+		or "Running totals from finished gold tables. Click Settled once the gold has changed hands.")
+	for i, r in ipairs(self.debtRows) do
+		local e = list[i]
+		if e then
+			local amt = e.d.amount
+			r.text:SetText(amt > 0
+				and ("|cff40ff40%s owes you %s|r"):format(e.name, ns.Money(amt, "iou"))
+				or ("|cffff6060You owe %s %s|r"):format(e.name, ns.Money(-amt, "iou")))
+			r.btn:SetScript("OnClick", function() ns.Ledger.ClearDebt(e.name) UI:Refresh() end)
+			W.Tooltip(r, function(tt)
+				tt:AddLine(e.name, 1, 0.82, 0)
+				for _, it in ipairs(e.d.items) do
+					tt:AddDoubleLine(date("%b %d", it.at) .. "  " .. tostring(it.note or ""), ns.Money(it.amount, "iou", true), 0.8, 0.8, 0.8, 1, 1, 1)
+				end
+			end)
+			r:Show()
+		else
+			r:Hide()
+		end
+	end
+end
+
+function UI:HistoryText()
+	local list = ns.db and ns.db.sessions or {}
+	if #list == 0 then return "|cff999999No finished tables yet.|r" end
+	local me = ns.Comm.Me()
+	local lines = {}
+	for i = #list, 1, -1 do
+		local e = list[i]
+		local mine
+		for _, n in ipairs(e.nets or {}) do if n.name == (e.me or me) then mine = n end end
+		local net = mine and mine.net or 0
+		local color = net > 0 and "|cff40ff40+" or net < 0 and "|cffff6060" or "|cffcccccc"
+		lines[#lines + 1] = ("|cffffd100%s|r  %s  |cff999999dealer %s, %d hands%s|r"):format(
+			date("%b %d %H:%M", e.time or 0), e.name or "?", e.dealer or "?", e.hands or 0, e.final and "" or ", left early")
+		lines[#lines + 1] = ("   you: %s%s|r   |cff999999%s|r"):format(color, ns.Money(net, e.mode), ns.Table.MODES[e.mode] or "")
+		if i == #list then
+			for _, n in ipairs(e.nets or {}) do
+				lines[#lines + 1] = ("      |cff999999%s %s%s|r"):format(n.name, n.net > 0 and "+" or "", ns.Money(n.net, e.mode, true))
+			end
+		end
+	end
+	lines[#lines + 1] = " "
+	lines[#lines + 1] = "|cff999999The last 120 log lines of each table are kept in your SavedVariables in case of a dispute.|r"
+	return table.concat(lines, "\n")
 end
 
 function UI:Toggle()
@@ -140,7 +218,13 @@ function UI:Refresh()
 	if not self.frame or not self.frame:IsShown() then return end
 	local t = T()
 	local text
+	local debts = self.tab == "debts"
+	self.scroll:SetShown(not debts)
+	self.debtHead:SetShown(debts)
+	if debts then return self:RefreshDebts() end
+	for _, r in ipairs(self.debtRows) do r:Hide() end
 	if self.tab == "help" then text = HELP
+	elseif self.tab == "history" then text = self:HistoryText()
 	elseif not t then text = "|cff999999You're not at a table.|r"
 	elseif self.tab == "audit" then text = self:AuditText(t)
 	else text = self:LedgerText(t) end

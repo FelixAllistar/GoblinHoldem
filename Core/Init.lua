@@ -7,8 +7,11 @@ local getMeta = (C_AddOns and C_AddOns.GetAddOnMetadata) or GetAddOnMetadata
 ns.version = getMeta and getMeta(ADDON, "Version") or "dev"
 
 local DEFAULTS = {
-	settings = { autoRoll = true, hideRolls = true, sound = true, autoOpen = false },
-	frames = {}, keys = {}, audit = {}, sessions = {},
+	settings = {
+		autoRoll = true, hideRolls = true, sound = true, autoOpen = false,
+		confirmAllIn = true, turnPopup = true, mini = false, minimap = true, scale = 1,
+	},
+	frames = {}, keys = {}, audit = {}, sessions = {}, debts = {}, minimapAngle = 215,
 }
 
 local function fill(dst, src)
@@ -122,6 +125,7 @@ end)
 on("PLAYER_LOGOUT", function()
 	ns.db.pool = ns.Fair.SavePool()
 	local t = ns.current
+	if t then ns.SaveSession(t) end
 	if t and t.isDealer and t.phase ~= "closed" then
 		ns.db.hosting = ns.SaveHosting(t)
 	else
@@ -175,6 +179,22 @@ if ChatFrame_AddMessageEventFilter then
 	end)
 end
 
+-- players: notice a dealer who vanished mid-hand
+C_Timer.NewTicker(5, function()
+	if ns.current then ns.current:Watchdog() end
+end)
+
+BINDING_HEADER_GOBLINHOLDEM = "Goblin Hold'em"
+BINDING_NAME_GOBLINHOLDEM_TOGGLE = "Open / close the table"
+BINDING_NAME_GOBLINHOLDEM_FOLD = "Fold (or queue check/fold)"
+BINDING_NAME_GOBLINHOLDEM_CALL = "Check / call (or queue it)"
+
+--- Minimap button / keybind: the table if we're at one (mini or full), otherwise the lobby.
+function ns.ToggleMain()
+	if not ns.current then return ns.LobbyUI:Toggle() end
+	if ns.db.settings.mini then ns.MiniUI:Toggle() else ns.TableUI:Toggle() end
+end
+
 -- public tables re-advertise once a minute
 C_Timer.NewTicker(60, function()
 	local t = ns.current
@@ -194,7 +214,22 @@ SLASH_GOBLINHOLDEM2 = "/gh"
 SlashCmdList.GOBLINHOLDEM = function(msg)
 	local cmd = (msg or ""):lower():match("^%s*(%S*)")
 	if cmd == "" then
-		if ns.current then ns.TableUI:Toggle() else ns.LobbyUI:Toggle() end
+		ns.ToggleMain()
+	elseif cmd == "mini" then
+		ns.db.settings.mini = true
+		if ns.TableUI.frame then ns.TableUI.frame:Hide() end
+		ns.MiniUI:Show()
+	elseif cmd == "full" then
+		ns.db.settings.mini = false
+		if ns.MiniUI.frame then ns.MiniUI.frame:Hide() end
+		ns.TableUI:Show()
+	elseif cmd == "debts" or cmd == "history" then
+		ns.LedgerUI:Show(cmd)
+	elseif cmd == "settings" or cmd == "options" or cmd == "config" then
+		ns.SettingsUI:Toggle()
+	elseif cmd == "minimap" then
+		toggleSetting("minimap", "Minimap button")
+		ns.MinimapButton:Update()
 	elseif cmd == "lobby" or cmd == "host" then
 		ns.LobbyUI:Toggle()
 	elseif cmd == "join" then
@@ -229,6 +264,7 @@ SlashCmdList.GOBLINHOLDEM = function(msg)
 	elseif cmd == "roll" then
 		if ns.current then ns.current:Roll() end
 	elseif cmd == "forget" then
+		if ns.current then ns.SaveSession(ns.current) end
 		if ns.current and ns.current.cfg.channel then ns.Comm.LeaveChannel(ns.current.cfg.channel) end
 		ns.current = nil
 		ns.Comm.SetRoute(nil)
@@ -245,14 +281,15 @@ SlashCmdList.GOBLINHOLDEM = function(msg)
 		ns.Print("/holdem join <name> - join a friend's table, wherever they are")
 		ns.Print("/holdem invite <name> - (dealer) invite someone to your table")
 		ns.Print("/holdem practice - solo table against goblin bots")
-		ns.Print("/holdem ledger | audit | fair - session ledger, hand audits, how the shuffle works")
-		ns.Print("/holdem rolls | sound | autoopen | autoroll - toggles")
+		ns.Print("/holdem mini | full - small HUD or the full table")
+		ns.Print("/holdem ledger | debts | history | audit | fair")
+		ns.Print("/holdem settings - options (also: right-click the minimap button)")
 		ns.Print("/holdem forget - drop a stuck table on your side")
 	end
 end
 
 StaticPopupDialogs["GOBLINHOLDEM_INVITED"] = {
-	text = "%s invites you to their Goblin Hold'em table |cffffd100%s|r (%s). Join?",
+	text = "%s",
 	button1 = "Join", button2 = "No thanks", timeout = 60, whileDead = true, hideOnEscape = true,
 	OnAccept = function(_, info)
 		info.openUI = true
@@ -262,7 +299,8 @@ StaticPopupDialogs["GOBLINHOLDEM_INVITED"] = {
 ns.Listen("TABLE_INVITE", function(info)
 	local c = info.cfg
 	local stakes = ns.Money(c.sb, c.mode, true) .. "/" .. ns.Money(c.bb, c.mode, true) .. " " .. (ns.Table.MODES[c.mode] or "")
-	StaticPopup_Show("GOBLINHOLDEM_INVITED", info.dealer, c.name, stakes, info)
+	local text = ("%s invites you to their Goblin Hold'em table |cffffd100%s|r (%s). Join?"):format(info.dealer, c.name, stakes)
+	StaticPopup_Show("GOBLINHOLDEM_INVITED", text, nil, info)
 end)
 
 ns.Listen("TABLE_ROLL_NEEDED", function()

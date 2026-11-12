@@ -143,7 +143,7 @@ function UI:Create()
 	self.seats:SetPoint("LEFT", lSeats, "LEFT", 110, 0)
 	local lTimer = W.Text(f, 12)
 	lTimer:SetPoint("LEFT", self.seats, "RIGHT", 18, 0)
-	lTimer:SetText("Turn timer (sec)")
+	lTimer:SetText("Turn timer (sec, 0 = none)")
 	lTimer:SetTextColor(1, 0.9, 0.7)
 	self.timer = W.Edit(f, 40, true)
 	self.timer:SetPoint("LEFT", lTimer, "RIGHT", 10, 0)
@@ -178,13 +178,13 @@ function UI:Create()
 	local d = ns.db and ns.db.hostDefaults or {}
 	self.name:SetText(d.name or ((UnitName("player") or "My") .. "'s Table"))
 	self.mode = d.mode or "iou"
-	self.sb:SetText(d.sb or "1")
-	self.bb:SetText(d.bb or "2")
-	self.minBuy:SetText(d.minBuy or "40")
-	self.maxBuy:SetText(d.maxBuy or "200")
+	self.sb:SetText(d.sb or "5s")
+	self.bb:SetText(d.bb or "10s")
+	self.minBuy:SetText(d.minBuy or "2g")
+	self.maxBuy:SetText(d.maxBuy or "10g")
 	self.seats:SetText(d.seats or "9")
-	self.timer:SetText(d.timer or "30")
-	self.myBuy:SetText(d.myBuy or "100")
+	self.timer:SetText(d.timer or "45")
+	self.myBuy:SetText(d.myBuy or "5g")
 	self.play:SetChecked(d.play ~= false)
 	self.public:SetChecked(d.public and true or false)
 	self.approve:SetChecked(d.approve and true or false)
@@ -237,7 +237,7 @@ function UI:Host()
 		mode = m, sb = money(self.sb), bb = money(self.bb),
 		minBuy = money(self.minBuy), maxBuy = money(self.maxBuy),
 		maxSeats = math.max(2, math.min(9, tonumber(self.seats:GetText()) or 9)),
-		actTimeout = math.max(10, math.min(120, tonumber(self.timer:GetText()) or 30)),
+		actTimeout = (function(v) if v <= 0 then return 0 end return math.max(10, math.min(600, v)) end)(tonumber(self.timer:GetText()) or 45),
 		dealerSeated = self.play:GetChecked() and m ~= "bank",
 		public = self.public:GetChecked() and true or false,
 		approveJoins = self.approve:GetChecked() and true or false,

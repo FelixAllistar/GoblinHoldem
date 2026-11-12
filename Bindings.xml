@@ -1,0 +1,5 @@
+<Bindings>
+	<Binding name="GOBLINHOLDEM_TOGGLE" header="GOBLINHOLDEM" category="ADDONS">GoblinHoldem.ToggleMain()</Binding>
+	<Binding name="GOBLINHOLDEM_FOLD" category="ADDONS">GoblinHoldem.TableUI:Do("fold")</Binding>
+	<Binding name="GOBLINHOLDEM_CALL" category="ADDONS">GoblinHoldem.TableUI:Do("call")</Binding>
+</Bindings>

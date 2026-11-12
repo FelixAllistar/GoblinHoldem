@@ -53,6 +53,7 @@ local function newTable(id, dealer, cfg)
 	t.alerts = {}
 	t.audits = {}
 	t.stats = { voids = 0, aborts = 0, verified = 0, failed = 0 }
+	t.progressAt = GetTime()
 	if t.isDealer then
 		t.keys = {}
 		t.requests = {} -- awaiting the dealer's approval
@@ -153,6 +154,7 @@ function Table:ApplySnapshot(str)
 	end
 	self.engine.seats = seats
 	self.synced = true
+	if not present[me()] then self.leaving = false end
 end
 
 function Table:CurrentEntries()
@@ -419,6 +421,9 @@ function Table:FinishRolls()
 			players[#players + 1] = seat
 		elseif cur.observed[name] then
 			self:Log(name .. " has no card key yet - sitting this hand out.")
+		else
+			self.pending.sitout[name] = true
+			self:Log(name .. " didn't respond and will sit out until they're back.")
 		end
 	end
 	if #players < 2 then
@@ -472,7 +477,9 @@ function Table:DealerOnEngine(event, a)
 			return
 		end
 		local quick = name and (self.pending.leaves[name] or self.away and self.away[name])
-		after(quick and 1 or self.cfg.actTimeout, function()
+		local limit = quick and 1 or (self.cfg.actTimeout or 0)
+		if limit <= 0 then return end -- no timer: the dealer can skip a stalled turn by hand
+		after(limit, function()
 			local hh = self.engine.hand
 			if hh and hh.no == no and hh.seq == seq and hh.toAct == seat and hh.phase == "betting" then
 				Comm.Group("TOUT", self.id, no, seq + 1, seat)
@@ -502,6 +509,56 @@ function Table:MaybeAutoDeal(delay)
 		self.autoDealPending = false
 		if self.autoDeal and self:CanDeal() then self:DealNext() end
 	end)
+end
+
+--- Dealer: force the player on the clock to check/fold now (everyone is told it was a skip).
+function Table:Nudge(seat)
+	local h = self.engine.hand
+	if not self.isDealer or not h or h.phase ~= "betting" or not h.toAct then return end
+	if seat and seat ~= h.toAct then return end
+	Comm.Group("TOUT", self.id, h.no, h.seq + 1, h.toAct)
+end
+
+--- Queue an action for when it's our turn: "checkfold" or "call" (only the bet we saw).
+function Table:SetPre(kind)
+	local h, seat = self.engine.hand, self:MySeat()
+	if not h or not seat or h.phase == "done" or not self.engine:CanAct(seat) then self.preAction = nil return end
+	if not kind or (self.preAction and self.preAction.kind == kind) then
+		self.preAction = nil
+	else
+		self.preAction = { kind = kind, bet = h.currentBet, no = h.no }
+	end
+	self:Changed()
+end
+
+function Table:RunPre(pre, seat)
+	local h = self.engine.hand
+	local L = self.engine:Legal(seat)
+	if not L or not h or pre.no ~= h.no then return false end
+	if pre.kind == "checkfold" then return self:Act(L.check and "check" or "fold") end
+	if pre.kind == "call" and (L.check or h.currentBet == pre.bet) then return self:Act(L.check and "check" or "call") end
+	return false
+end
+
+--- Players: if the dealer has gone silent in the middle of a hand, stop waiting.
+function Table:Watchdog()
+	if self.isDealer or self.phase == "closed" or self.cfg.transport == "practice" then return end
+	local h = self.engine.hand
+	local live = self.phase == "rolling" or (h and h.phase ~= "done")
+	if not live then return end
+	local limit = 75
+	if h and h.phase == "betting" then
+		local timer = self.cfg.actTimeout or 0
+		if timer <= 0 then return end
+		limit = timer + 60
+	end
+	if GetTime() - (self.progressAt or GetTime()) < limit then return end
+	if self.engine:InHand() then self.engine:Void() end
+	self:ApplySnapshot("")
+	self.phase = "closed"
+	self:Alert("The dealer stopped responding. Table closed; the unfinished hand was voided and your chips count as cashed out.", "warn")
+	ns.SaveSession(self, true)
+	self:Changed()
 end
 
 function Table:Close()
@@ -589,6 +646,7 @@ function ns.OnMessage(sender, dist, f)
 	if not h then return end
 	if kind == "TBL" then return h(sender, f, dist) end
 	if not t or f[2] ~= t.id then return end
+	t.progressAt = GetTime()
 	return h(t, sender, f, dist)
 end
 
@@ -612,6 +670,7 @@ function Table.Join(info)
 	if t and t.phase ~= "closed" and t.id ~= info.id then
 		if t.isDealer then ns.Print("Close your own table first.") return nil end
 		Comm.Group("LEAVE", t.id)
+		ns.SaveSession(t)
 	end
 	local nt = newTable(info.id, info.dealer, info.cfg)
 	nt.handNo = info.handNo
@@ -652,6 +711,9 @@ handlers.TBL = function(sender, f, dist)
 		info.openUI = true
 		Table.Join(info)
 	else
+		ns.inviteAt = ns.inviteAt or {}
+		if GetTime() - (ns.inviteAt[sender] or -999) < 60 then return end
+		ns.inviteAt[sender] = GetTime()
 		ns.Emit("TABLE_INVITE", info)
 	end
 end
@@ -731,7 +793,7 @@ handlers.CLOSE = function(t, sender, f)
 	if t.cfg.channel then after(3, function() Comm.LeaveChannel(t.cfg.channel) end) end
 	if ns.db then ns.db.joined = nil end
 	ns.Emit("TABLE_CLOSED", t)
-	ns.SaveSession(t)
+	ns.SaveSession(t, true)
 	t:Changed()
 end
 
@@ -742,7 +804,10 @@ handlers.HAND = function(t, sender, f)
 	if t.engine:InHand() then -- we missed the end of the last hand somehow
 		t.engine:Void()
 		t.synced = false
+	elseif t.phase ~= "idle" then
+		t.synced = false
 	end
+	t.preAction = nil
 	t:ApplySnapshot(f[5])
 	t.handNo = no
 	t.phase = "rolling"
@@ -919,7 +984,16 @@ handlers.TOUT = function(t, sender, f)
 	local no, seq, seat = tonumber(f[3]), tonumber(f[4]), tonumber(f[5])
 	if not h or h.no ~= no or h.seq + 1 ~= seq or h.toAct ~= seat then return end
 	local legal = t.engine:Legal(seat)
-	t:Log(t:Name(seat) .. " ran out of time.")
+	local name = t:Name(seat)
+	local timer = t.cfg.actTimeout or 0
+	local waited = GetTime() - (t.turnAt or GetTime())
+	if timer <= 0 or waited < timer - 5 then
+		t:Log(("The dealer skipped %s's turn after %d seconds."):format(name, waited))
+	else
+		t:Log(name .. " ran out of time and will sit out until they're back.")
+	end
+	if t.isDealer and not (t.bots and t.bots[name]) then t.pending.sitout[name] = true end
+	if name == me() then ns.Emit("TABLE_TIMED_OUT", t) end
 	t.engine:Act(seat, legal and legal.check and "check" or "fold")
 end
 
@@ -1048,7 +1122,20 @@ local VERB = { fold = "folds", check = "checks", call = "calls", raise = "raises
 
 function Table:OnEngine(event, a, b, c, d)
 	local e = self.engine
-	if event == "handStart" then
+	self.progressAt = GetTime()
+	if event == "turn" then
+		self.turnAt = GetTime()
+		if a == self:MySeat() then
+			local pre = self.preAction
+			self.preAction = nil
+			after(pre and 0.6 or 0, function()
+				local h = self.engine.hand
+				if not h or h.toAct ~= a or h.phase ~= "betting" then return end
+				if pre and self:RunPre(pre, a) then return end
+				ns.Emit("TABLE_TURN", self)
+			end)
+		end
+	elseif event == "handStart" then
 		local h = a
 		self:Log(("%s has the button. Blinds: %s / %s."):format(self:Name(h.button), self:Name(h.sbSeat), self:Name(h.bbSeat)))
 	elseif event == "action" then
@@ -1060,8 +1147,10 @@ function Table:OnEngine(event, a, b, c, d)
 		end
 		if s and s.stack == 0 and kind ~= "fold" and kind ~= "check" then text = text .. " (all-in)" end
 		self:Log(text)
+		if kind == "raise" and self.preAction and self.preAction.kind == "call" then self.preAction = nil end
 		ns.Emit("TABLE_ACTION", self, seat, kind)
 	elseif event == "board" then
+		self.preAction = nil
 		self:Log(("*** %s *** %s"):format(a:upper(), Cards.ListToString(e.hand.board)))
 	elseif event == "handEnd" then
 		local r = a
@@ -1084,6 +1173,8 @@ function Table:OnEngine(event, a, b, c, d)
 			local seat = e:SeatOf(name)
 			if seat then L.stack = e.seats[seat].stack end
 		end
+		self.preAction = nil
+		ns.SaveSession(self)
 		ns.Emit("TABLE_HAND_END", self, r)
 	end
 	if self.isDealer then self:DealerOnEngine(event, a) end
@@ -1101,7 +1192,7 @@ function Table:OnRoster(inGroup)
 			self:ApplySnapshot("")
 			self.phase = "closed"
 			self:Alert("The dealer left the group. Table closed; the last hand was voided.", "warn")
-			ns.SaveSession(self)
+			ns.SaveSession(self, true)
 			self:Changed()
 		end
 		return
@@ -1128,7 +1219,7 @@ function Table:OnChannelLeave(name)
 			self:ApplySnapshot("")
 			self.phase = "closed"
 			self:Alert("The dealer left. Table closed; the last hand was voided.", "warn")
-			ns.SaveSession(self)
+			ns.SaveSession(self, true)
 			self:Changed()
 		end
 		return
